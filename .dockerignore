@@ -1,0 +1,6 @@
+node_modules/
+.env
+*.png
+.git/
+setup.sh
+src/test-scrape.js
