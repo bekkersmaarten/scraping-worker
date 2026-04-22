@@ -176,10 +176,27 @@ async function searchAndExtractVehicle(page, kenteken) {
   }
 
   console.log('[Vehicle] Wachten op resultaten...');
-  await page.waitForTimeout(5000);
 
-  // Extract voertuiggegevens uit het content-frame
-  return await extractVehicleData(page, cleanKenteken);
+  // Wacht tot de voertuigdata verschijnt in een van de frames
+  // Probeer meerdere keren met toenemende wachttijd
+  let vehicleData = null;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    await page.waitForTimeout(3000);
+    console.log(`[Vehicle] Poging ${attempt}/5 om voertuigdata te extraheren...`);
+    try {
+      vehicleData = await extractVehicleData(page, cleanKenteken);
+      if (vehicleData) break;
+    } catch (e) {
+      console.log(`[Vehicle] Poging ${attempt} mislukt: ${e.message}`);
+    }
+  }
+
+  if (!vehicleData) {
+    await page.screenshot({ path: `vehicle-data-debug.png` });
+    throw new Error('Kon geen voertuiggegevens extraheren na 5 pogingen');
+  }
+
+  return vehicleData;
 }
 
 async function extractVehicleData(page, kenteken) {
@@ -266,8 +283,8 @@ async function extractVehicleData(page, kenteken) {
   }
 
   if (!data) {
-    await page.screenshot({ path: 'vehicle-data-debug.png' });
-    throw new Error('Kon geen voertuiggegevens extraheren');
+    console.log('[Vehicle] Geen data gevonden in deze poging');
+    return null;
   }
 
   // Zorg dat kenteken altijd aanwezig is
