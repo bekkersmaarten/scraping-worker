@@ -108,25 +108,22 @@ async function login(page) {
       const loadedFrames = page.frames().map(f => f.url());
       console.log(`[Login] Geladen frames (${loadedFrames.length}): ${loadedFrames.join(', ')}`);
 
-      // FIX: Als het hub-frame niet geladen is (about:blank), navigeer het handmatig
-      const hubFrame = page.frames().find(f => f.url() === 'about:blank' || f.url() === '');
-      if (hubFrame) {
-        const hubUrl = framesetInfo.find(fi => fi.name === 'frameHub')?.src;
-        if (hubUrl && hubUrl !== '(no src)') {
-          console.log(`[Login] Hub-frame is about:blank, handmatig navigeren naar: ${hubUrl}`);
-          try {
-            await hubFrame.goto(hubUrl, { waitUntil: 'networkidle', timeout: 30000 });
-            console.log(`[Login] Hub-frame geladen: ${hubFrame.url()}`);
-          } catch (e) {
-            console.log(`[Login] Hub-frame laden mislukt: ${e.message.substring(0, 100)}`);
+      // Het hub-frame (frameHub) laadt soms niet maar overlapt wel de UI.
+      // We verbergen het via JavaScript zodat het de klikken niet blokkeert.
+      const hubFrameAboutBlank = page.frames().find(f => f.url() === 'about:blank' || f.url() === '');
+      if (hubFrameAboutBlank) {
+        console.log('[Login] Hub-frame is about:blank — verbergen zodat het kliks niet blokkeert');
+        await page.evaluate(() => {
+          const hub = document.querySelector('frame[name="frameHub"], frame#frameHub');
+          if (hub) {
+            hub.style.visibility = 'hidden';
+            hub.style.position = 'absolute';
+            hub.style.width = '0';
+            hub.style.height = '0';
+            console.log('Hub frame verborgen');
           }
-          await page.waitForTimeout(3000);
-        }
+        });
       }
-
-      // Log finale frame-staat
-      const finalFrames = page.frames().map(f => f.url());
-      console.log(`[Login] Finale frames (${finalFrames.length}): ${finalFrames.join(', ')}`);
 
       return;
     }
@@ -212,10 +209,11 @@ async function searchAndExtractVehicle(page, kenteken) {
   console.log(`[Vehicle] Veldwaarde na type: "${fieldValue}"`);
 
   // Klik de OK knop (type="image", name="VIN_OK_BUTTON")
+  // Gebruik force:true omdat het hub-frame soms pointer events intercepted
   const okBtn = await targetFrame.$('input[name="VIN_OK_BUTTON"]');
   if (okBtn) {
-    console.log('[Vehicle] Klik OK button...');
-    await okBtn.click();
+    console.log('[Vehicle] Klik OK button (force)...');
+    await okBtn.click({ force: true });
   } else {
     console.log('[Vehicle] Geen OK button, Enter gebruiken...');
     await searchInput.press('Enter');
