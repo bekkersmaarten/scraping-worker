@@ -198,26 +198,26 @@ async function searchAndExtractVehicle(page, kenteken) {
 
   console.log(`[Vehicle] Zoekveld gevonden in frame: ${targetFrame.url()}`);
 
-  // Wis het veld en vul kenteken in (originele methode die lokaal + eerste deploy werkte)
-  await searchInput.evaluate(el => { el.value = ''; });
-  await searchInput.click();
-  await searchInput.type(cleanKenteken, { delay: 100 }); // iets langere delay dan origineel
-  console.log(`[Vehicle] Kenteken ingevoerd: ${cleanKenteken}`);
+  // Vul kenteken in en submit via JavaScript (bypassed frameset pointer interception)
+  console.log('[Vehicle] Kenteken invullen en submitten via JS...');
+  await targetFrame.evaluate((kent) => {
+    const input = document.querySelector('input#short-vin, input[name="shortvin"]');
+    if (!input) throw new Error('Zoekveld niet gevonden in frame');
+    input.value = kent;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
 
-  // Verifieer dat de waarde correct is ingevuld
-  const fieldValue = await searchInput.evaluate(el => el.value);
-  console.log(`[Vehicle] Veldwaarde na type: "${fieldValue}"`);
-
-  // Klik de OK knop (type="image", name="VIN_OK_BUTTON")
-  // Gebruik force:true omdat het hub-frame soms pointer events intercepted
-  const okBtn = await targetFrame.$('input[name="VIN_OK_BUTTON"]');
-  if (okBtn) {
-    console.log('[Vehicle] Klik OK button (force)...');
-    await okBtn.click({ force: true });
-  } else {
-    console.log('[Vehicle] Geen OK button, Enter gebruiken...');
-    await searchInput.press('Enter');
-  }
+    // Klik de OK button via JS (bypassed pointer event checks)
+    const okBtn = document.querySelector('input[name="VIN_OK_BUTTON"]');
+    if (okBtn) {
+      okBtn.click();
+    } else {
+      // Fallback: submit het formulier
+      const form = input.closest('form');
+      if (form) form.submit();
+    }
+  }, cleanKenteken);
+  console.log(`[Vehicle] Kenteken ${cleanKenteken} ingevoerd en gesubmit via JS`);
 
   // Wacht op resultaten — de frameset herlaadt na de zoekopdracht
   console.log('[Vehicle] Wachten op resultaten (10s)...');
