@@ -161,77 +161,59 @@ async function searchAndExtractVehicle(page, kenteken) {
 
   console.log(`[Vehicle] Zoekveld gevonden in frame: ${targetFrame.url()}`);
 
-  // Vul het kenteken in via JavaScript (betrouwbaarder dan type() in headless)
-  await searchInput.evaluate((el, kent) => {
-    el.value = kent;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }, cleanKenteken);
-  console.log(`[Vehicle] Kenteken ingevoerd via JS: ${cleanKenteken}`);
+  // Wis het veld en vul kenteken in (originele methode die lokaal + eerste deploy werkte)
+  await searchInput.evaluate(el => { el.value = ''; });
+  await searchInput.click();
+  await searchInput.type(cleanKenteken, { delay: 100 }); // iets langere delay dan origineel
+  console.log(`[Vehicle] Kenteken ingevoerd: ${cleanKenteken}`);
 
-  // Log form-details voor debugging
-  const formInfo = await targetFrame.evaluate(() => {
-    const input = document.querySelector('input#short-vin, input[name="shortvin"]');
-    const form = input?.closest('form');
-    if (form) {
-      return {
-        action: form.action,
-        method: form.method,
-        target: form.target,
-        value: input.value,
-        allInputs: Array.from(form.querySelectorAll('input')).map(i => `${i.name}=${i.value}`).join(', ')
-      };
-    }
-    return { noForm: true, value: input?.value };
-  });
-  console.log(`[Vehicle] Form info:`, JSON.stringify(formInfo));
+  // Verifieer dat de waarde correct is ingevuld
+  const fieldValue = await searchInput.evaluate(el => el.value);
+  console.log(`[Vehicle] Veldwaarde na type: "${fieldValue}"`);
 
-  // Submit de form programmatisch
-  console.log('[Vehicle] Form submitten...');
-  await targetFrame.evaluate(() => {
-    const input = document.querySelector('input#short-vin, input[name="shortvin"]');
-    const form = input?.closest('form');
-    if (form) {
-      form.submit();
-    }
-  });
+  // Klik de OK knop (type="image", name="VIN_OK_BUTTON")
+  const okBtn = await targetFrame.$('input[name="VIN_OK_BUTTON"]');
+  if (okBtn) {
+    console.log('[Vehicle] Klik OK button...');
+    await okBtn.click();
+  } else {
+    console.log('[Vehicle] Geen OK button, Enter gebruiken...');
+    await searchInput.press('Enter');
+  }
 
-  // Wacht op networkidle (alle frames laden klaar)
-  console.log('[Vehicle] Wachten op networkidle...');
-  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-  await page.waitForTimeout(5000);
+  // Wacht op resultaten — de frameset herlaadt na de zoekopdracht
+  console.log('[Vehicle] Wachten op resultaten (10s)...');
+  await page.waitForTimeout(10000);
 
-  // Log frames na submit
-  console.log(`[Vehicle] Frames na submit:`);
+  // Log huidige frame-staat
   for (const f of page.frames()) {
     const url = f.url();
     if (url !== 'about:blank') {
-      console.log(`[Vehicle]   ${url.substring(0, 120)}`);
+      console.log(`[Vehicle] Frame: ${url.substring(0, 120)}`);
     }
   }
 
-  // Probeer data te extraheren — max 3 pogingen
+  // Probeer data te extraheren — 4 pogingen met 8s tussenpozen
   let vehicleData = null;
   for (let attempt = 1; attempt <= 4; attempt++) {
-    console.log(`[Vehicle] Poging ${attempt}/4...`);
-    try {
-      vehicleData = await extractVehicleData(page, cleanKenteken);
-      if (vehicleData) break;
-    } catch (e) {
-      console.log(`[Vehicle] Poging ${attempt} mislukt: ${e.message.substring(0, 80)}`);
-    }
-    await page.waitForTimeout(5000);
+    console.log(`[Vehicle] Poging ${attempt}/4 om voertuigdata te extraheren...`);
+    vehicleData = await extractVehicleData(page, cleanKenteken);
+    if (vehicleData) break;
+
+    console.log(`[Vehicle] Nog geen data, wacht 8s...`);
+    await page.waitForTimeout(8000);
   }
 
   if (!vehicleData) {
-    // Debug: log alle frame-inhouden
-    console.log('[Vehicle] === DEBUG frame-inhouden ===');
+    // Debug: log inhoud van alle frames
+    console.log('[Vehicle] === MISLUKT — frame-inhouden: ===');
     for (const f of page.frames()) {
       try {
         const url = f.url();
-        const text = await f.evaluate(() => (document.body?.innerText || '').substring(0, 400));
+        const text = await f.evaluate(() => (document.body?.innerText || '').substring(0, 500));
         if (text.length > 10) {
-          console.log(`[Vehicle] [${url.substring(0, 80)}]: ${text.substring(0, 200)}`);
+          console.log(`[Vehicle] [${url.substring(0, 80)}]:`);
+          console.log(text.substring(0, 250));
         }
       } catch {}
     }
