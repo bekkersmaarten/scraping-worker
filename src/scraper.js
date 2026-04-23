@@ -99,7 +99,7 @@ async function login(page) {
       });
       console.log('[Login] Frameset structuur:', JSON.stringify(framesetInfo));
 
-      // Wacht tot ALLE frames geladen zijn (niet alleen de frameset zelf)
+      // Wacht tot ALLE frames geladen zijn
       console.log('[Login] Wachten tot alle frames geladen zijn...');
       await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(3000);
@@ -107,6 +107,26 @@ async function login(page) {
       // Log welke frames er daadwerkelijk geladen zijn
       const loadedFrames = page.frames().map(f => f.url());
       console.log(`[Login] Geladen frames (${loadedFrames.length}): ${loadedFrames.join(', ')}`);
+
+      // FIX: Als het hub-frame niet geladen is (about:blank), navigeer het handmatig
+      const hubFrame = page.frames().find(f => f.url() === 'about:blank' || f.url() === '');
+      if (hubFrame) {
+        const hubUrl = framesetInfo.find(fi => fi.name === 'frameHub')?.src;
+        if (hubUrl && hubUrl !== '(no src)') {
+          console.log(`[Login] Hub-frame is about:blank, handmatig navigeren naar: ${hubUrl}`);
+          try {
+            await hubFrame.goto(hubUrl, { waitUntil: 'networkidle', timeout: 30000 });
+            console.log(`[Login] Hub-frame geladen: ${hubFrame.url()}`);
+          } catch (e) {
+            console.log(`[Login] Hub-frame laden mislukt: ${e.message.substring(0, 100)}`);
+          }
+          await page.waitForTimeout(3000);
+        }
+      }
+
+      // Log finale frame-staat
+      const finalFrames = page.frames().map(f => f.url());
+      console.log(`[Login] Finale frames (${finalFrames.length}): ${finalFrames.join(', ')}`);
 
       return;
     }
