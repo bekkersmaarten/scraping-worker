@@ -167,21 +167,36 @@ async function searchAndExtractVehicle(page, kenteken) {
   await searchInput.type(cleanKenteken, { delay: 50 });
   console.log(`[Vehicle] Kenteken ingevoerd: ${cleanKenteken}`);
 
-  // Klik de OK knop (type="image", name="VIN_OK_BUTTON")
+  // Klik de OK knop en wacht op frame-navigatie
   const okBtn = await targetFrame.$('input[name="VIN_OK_BUTTON"]');
+
+  console.log('[Vehicle] Klik OK en wacht op navigatie...');
   if (okBtn) {
-    await okBtn.click();
+    // Wacht op navigatie in een willekeurig frame (het resultaatframe laadt opnieuw)
+    await Promise.all([
+      page.waitForTimeout(2000), // minimale wacht
+      okBtn.click(),
+    ]);
   } else {
     await searchInput.press('Enter');
   }
 
-  console.log('[Vehicle] Wachten op resultaten...');
+  // Wacht tot frames klaar zijn met laden
+  await page.waitForTimeout(5000);
 
-  // Wacht tot de voertuigdata verschijnt in een van de frames
+  // Log welke frames er nu zijn (debugging)
+  const framesAfter = page.frames();
+  console.log(`[Vehicle] Frames na zoekopdracht: ${framesAfter.length}`);
+  for (const f of framesAfter) {
+    const url = f.url();
+    if (url !== 'about:blank') {
+      console.log(`[Vehicle]   Frame: ${url.substring(0, 120)}`);
+    }
+  }
+
   // Probeer meerdere keren met toenemende wachttijd
   let vehicleData = null;
   for (let attempt = 1; attempt <= 5; attempt++) {
-    await page.waitForTimeout(3000);
     console.log(`[Vehicle] Poging ${attempt}/5 om voertuigdata te extraheren...`);
     try {
       vehicleData = await extractVehicleData(page, cleanKenteken);
@@ -189,9 +204,28 @@ async function searchAndExtractVehicle(page, kenteken) {
     } catch (e) {
       console.log(`[Vehicle] Poging ${attempt} mislukt: ${e.message}`);
     }
+
+    // Wacht langer bij elke poging (5s, 7s, 9s, 11s, 13s)
+    const waitMs = 5000 + (attempt - 1) * 2000;
+    console.log(`[Vehicle] Wacht ${waitMs/1000}s voor volgende poging...`);
+    await page.waitForTimeout(waitMs);
+
+    // Probeer ook te wachten tot frames geladen zijn
+    for (const f of page.frames()) {
+      try { await f.waitForLoadState('domcontentloaded', { timeout: 3000 }); } catch {}
+    }
   }
 
   if (!vehicleData) {
+    // Log de inhoud van alle frames voor debugging
+    for (const f of page.frames()) {
+      try {
+        const text = await f.evaluate(() => (document.body?.innerText || '').substring(0, 500));
+        if (text.length > 10) {
+          console.log(`[Vehicle] Frame content (${f.url().substring(0, 60)}): ${text.substring(0, 200)}`);
+        }
+      } catch {}
+    }
     await page.screenshot({ path: `vehicle-data-debug.png` });
     throw new Error('Kon geen voertuiggegevens extraheren na 5 pogingen');
   }
