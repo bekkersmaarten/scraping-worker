@@ -87,7 +87,27 @@ async function login(page) {
     });
     if (hasFrames) {
       console.log('[Login] Al ingelogd (HTTP credentials werkten)');
-      await page.waitForTimeout(2000);
+
+      // Log de frameset HTML zodat we zien welke frames er zouden moeten zijn
+      const framesetInfo = await page.evaluate(() => {
+        const frames = document.querySelectorAll('frame, iframe');
+        return Array.from(frames).map(f => ({
+          name: f.name || f.id || '(unnamed)',
+          src: f.src || '(no src)',
+          tagName: f.tagName
+        }));
+      });
+      console.log('[Login] Frameset structuur:', JSON.stringify(framesetInfo));
+
+      // Wacht tot ALLE frames geladen zijn (niet alleen de frameset zelf)
+      console.log('[Login] Wachten tot alle frames geladen zijn...');
+      await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(3000);
+
+      // Log welke frames er daadwerkelijk geladen zijn
+      const loadedFrames = page.frames().map(f => f.url());
+      console.log(`[Login] Geladen frames (${loadedFrames.length}): ${loadedFrames.join(', ')}`);
+
       return;
     }
   }
