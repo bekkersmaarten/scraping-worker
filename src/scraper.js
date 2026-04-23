@@ -167,67 +167,72 @@ async function searchAndExtractVehicle(page, kenteken) {
   await searchInput.type(cleanKenteken, { delay: 50 });
   console.log(`[Vehicle] Kenteken ingevoerd: ${cleanKenteken}`);
 
-  // Klik de OK knop en wacht op frame-navigatie
+  // Klik de OK knop — het zoekformulier wordt verstuurd via de form action
+  // Dit veroorzaakt een navigatie in het socle-frame (of een ander content-frame)
   const okBtn = await targetFrame.$('input[name="VIN_OK_BUTTON"]');
 
-  console.log('[Vehicle] Klik OK en wacht op navigatie...');
+  console.log('[Vehicle] Klik OK...');
   if (okBtn) {
-    // Wacht op navigatie in een willekeurig frame (het resultaatframe laadt opnieuw)
-    await Promise.all([
-      page.waitForTimeout(2000), // minimale wacht
-      okBtn.click(),
-    ]);
+    await okBtn.click();
   } else {
     await searchInput.press('Enter');
   }
 
-  // Wacht tot frames klaar zijn met laden
-  await page.waitForTimeout(5000);
+  // Wacht tot het socle-frame genavigeerd is (URL verandert van socle/?start=true)
+  console.log('[Vehicle] Wachten op frame-navigatie na zoekopdracht...');
+  try {
+    await targetFrame.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 });
+    console.log(`[Vehicle] Frame genavigeerd naar: ${targetFrame.url()}`);
+  } catch (e) {
+    console.log(`[Vehicle] Frame navigatie timeout: ${e.message.substring(0, 100)}`);
+    // Fallback: gewoon wachten
+    await page.waitForTimeout(10000);
+  }
 
-  // Log welke frames er nu zijn (debugging)
-  const framesAfter = page.frames();
-  console.log(`[Vehicle] Frames na zoekopdracht: ${framesAfter.length}`);
-  for (const f of framesAfter) {
+  // Extra wacht voor content rendering
+  await page.waitForTimeout(3000);
+
+  // Log alle frames na navigatie
+  for (const f of page.frames()) {
     const url = f.url();
     if (url !== 'about:blank') {
-      console.log(`[Vehicle]   Frame: ${url.substring(0, 120)}`);
+      console.log(`[Vehicle] Frame: ${url.substring(0, 120)}`);
+      try {
+        const text = await f.evaluate(() => (document.body?.innerText || '').substring(0, 300));
+        if (text.includes('Kenteken') || text.includes('VIN') || text.includes('Immatriculation')) {
+          console.log(`[Vehicle] ^^^ Dit frame bevat voertuigdata!`);
+        }
+      } catch {}
     }
   }
 
-  // Probeer meerdere keren met toenemende wachttijd
+  // Probeer meerdere keren om data te extraheren
   let vehicleData = null;
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    console.log(`[Vehicle] Poging ${attempt}/5 om voertuigdata te extraheren...`);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    console.log(`[Vehicle] Poging ${attempt}/3 om voertuigdata te extraheren...`);
     try {
       vehicleData = await extractVehicleData(page, cleanKenteken);
       if (vehicleData) break;
     } catch (e) {
       console.log(`[Vehicle] Poging ${attempt} mislukt: ${e.message}`);
     }
-
-    // Wacht langer bij elke poging (5s, 7s, 9s, 11s, 13s)
-    const waitMs = 5000 + (attempt - 1) * 2000;
-    console.log(`[Vehicle] Wacht ${waitMs/1000}s voor volgende poging...`);
-    await page.waitForTimeout(waitMs);
-
-    // Probeer ook te wachten tot frames geladen zijn
-    for (const f of page.frames()) {
-      try { await f.waitForLoadState('domcontentloaded', { timeout: 3000 }); } catch {}
-    }
+    await page.waitForTimeout(5000);
   }
 
   if (!vehicleData) {
-    // Log de inhoud van alle frames voor debugging
+    // Uitgebreide debug logging
+    console.log('[Vehicle] === DEBUG: Alle frame-inhouden ===');
     for (const f of page.frames()) {
       try {
         const text = await f.evaluate(() => (document.body?.innerText || '').substring(0, 500));
         if (text.length > 10) {
-          console.log(`[Vehicle] Frame content (${f.url().substring(0, 60)}): ${text.substring(0, 200)}`);
+          console.log(`[Vehicle] [${f.url().substring(0, 80)}]:`);
+          console.log(text.substring(0, 300));
         }
       } catch {}
     }
     await page.screenshot({ path: `vehicle-data-debug.png` });
-    throw new Error('Kon geen voertuiggegevens extraheren na 5 pogingen');
+    throw new Error('Kon geen voertuiggegevens extraheren na 3 pogingen');
   }
 
   return vehicleData;
