@@ -108,21 +108,41 @@ async function login(page) {
       const loadedFrames = page.frames().map(f => f.url());
       console.log(`[Login] Geladen frames (${loadedFrames.length}): ${loadedFrames.join(', ')}`);
 
-      // Het hub-frame (frameHub) laadt soms niet maar overlapt wel de UI.
-      // We verbergen het via JavaScript zodat het de klikken niet blokkeert.
+      // Het hub-frame (frameHub) laadt soms niet op Railway (blijft about:blank).
+      // Fix: forceer het laden door src opnieuw te zetten via JavaScript.
       const hubFrameAboutBlank = page.frames().find(f => f.url() === 'about:blank' || f.url() === '');
       if (hubFrameAboutBlank) {
-        console.log('[Login] Hub-frame is about:blank — verbergen zodat het kliks niet blokkeert');
+        console.log('[Login] Hub-frame is about:blank — forceer laden via src reset');
         await page.evaluate(() => {
-          const hub = document.querySelector('frame[name="frameHub"], frame#frameHub');
+          const hub = document.querySelector('frame[name="frameHub"]');
           if (hub) {
-            hub.style.visibility = 'hidden';
-            hub.style.position = 'absolute';
-            hub.style.width = '0';
-            hub.style.height = '0';
-            console.log('Hub frame verborgen');
+            // Reset de src om het frame opnieuw te laden
+            hub.src = '/do/loadFrameHub';
           }
         });
+
+        // Wacht tot het frame geladen is
+        await page.waitForTimeout(5000);
+        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+        const hubUrl = hubFrameAboutBlank.url();
+        console.log(`[Login] Hub-frame na src reset: ${hubUrl}`);
+
+        // Als het nog steeds about:blank is, probeer de volledige URL
+        if (hubUrl === 'about:blank' || hubUrl === '') {
+          console.log('[Login] Hub-frame laadt nog niet, probeer volledige URL...');
+          await page.evaluate(() => {
+            const hub = document.querySelector('frame[name="frameHub"]');
+            if (hub) hub.src = 'https://servicebox.mpsa.com/do/loadFrameHub';
+          });
+          await page.waitForTimeout(5000);
+          await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+          console.log(`[Login] Hub-frame (2e poging): ${hubFrameAboutBlank.url()}`);
+        }
+
+        // Log finale frames
+        const finalFrames = page.frames().map(f => f.url());
+        console.log(`[Login] Finale frames: ${finalFrames.join(', ')}`);
       }
 
       return;
