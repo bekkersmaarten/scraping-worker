@@ -167,9 +167,14 @@ async function searchAndExtractVehicle(page, kenteken) {
   await searchInput.type(cleanKenteken, { delay: 50 });
   console.log(`[Vehicle] Kenteken ingevoerd: ${cleanKenteken}`);
 
-  // Klik de OK knop — het zoekformulier wordt verstuurd via de form action
-  // Dit veroorzaakt een navigatie in het socle-frame (of een ander content-frame)
+  // De OK-klik triggert een form-submit in het socle-frame.
+  // Het zoekresultaat laadt in het hub-frame (een ander frame in de frameset).
+  // We moeten wachten tot het hub-frame de resultaten toont.
   const okBtn = await targetFrame.$('input[name="VIN_OK_BUTTON"]');
+
+  // Bewaar de huidige frame-URLs zodat we detecteren welk frame verandert
+  const frameUrlsBefore = new Set(page.frames().map(f => f.url()));
+  console.log(`[Vehicle] Frames voor klik: ${[...frameUrlsBefore].join(', ')}`);
 
   console.log('[Vehicle] Klik OK...');
   if (okBtn) {
@@ -178,50 +183,60 @@ async function searchAndExtractVehicle(page, kenteken) {
     await searchInput.press('Enter');
   }
 
-  // Wacht tot het socle-frame genavigeerd is (URL verandert van socle/?start=true)
-  console.log('[Vehicle] Wachten op frame-navigatie na zoekopdracht...');
-  try {
-    await targetFrame.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 });
-    console.log(`[Vehicle] Frame genavigeerd naar: ${targetFrame.url()}`);
-  } catch (e) {
-    console.log(`[Vehicle] Frame navigatie timeout: ${e.message.substring(0, 100)}`);
-    // Fallback: gewoon wachten
-    await page.waitForTimeout(10000);
+  // Wacht tot de pagina alle network requests heeft afgehandeld
+  console.log('[Vehicle] Wachten op networkidle...');
+  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(5000);
+
+  // Log frames na de zoekopdracht
+  const framesAfter = page.frames();
+  console.log(`[Vehicle] Frames na klik (${framesAfter.length}):`);
+  for (const f of framesAfter) {
+    const url = f.url();
+    const isNew = !frameUrlsBefore.has(url);
+    console.log(`[Vehicle]   ${isNew ? '🆕 ' : '   '}${url.substring(0, 120)}`);
   }
 
-  // Extra wacht voor content rendering
-  await page.waitForTimeout(3000);
+  // Probeer data te extraheren — poll tot max 60 seconden
+  let vehicleData = null;
+  const maxWaitMs = 60000;
+  const startTime = Date.now();
+  let attempt = 0;
 
-  // Log alle frames na navigatie
-  for (const f of page.frames()) {
-    const url = f.url();
-    if (url !== 'about:blank') {
-      console.log(`[Vehicle] Frame: ${url.substring(0, 120)}`);
+  while (!vehicleData && (Date.now() - startTime) < maxWaitMs) {
+    attempt++;
+    console.log(`[Vehicle] Poging ${attempt} (${Math.round((Date.now() - startTime) / 1000)}s)...`);
+
+    // Check alle frames voor voertuigdata
+    for (const f of page.frames()) {
       try {
-        const text = await f.evaluate(() => (document.body?.innerText || '').substring(0, 300));
-        if (text.includes('Kenteken') || text.includes('VIN') || text.includes('Immatriculation')) {
-          console.log(`[Vehicle] ^^^ Dit frame bevat voertuigdata!`);
+        const hasData = await f.evaluate((kent) => {
+          const text = document.body?.innerText || '';
+          return text.includes('Kenteken') && text.includes(kent);
+        }, cleanKenteken);
+        if (hasData) {
+          console.log(`[Vehicle] Data gevonden in frame: ${f.url().substring(0, 100)}`);
         }
       } catch {}
     }
-  }
 
-  // Probeer meerdere keren om data te extraheren
-  let vehicleData = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    console.log(`[Vehicle] Poging ${attempt}/3 om voertuigdata te extraheren...`);
     try {
       vehicleData = await extractVehicleData(page, cleanKenteken);
       if (vehicleData) break;
     } catch (e) {
-      console.log(`[Vehicle] Poging ${attempt} mislukt: ${e.message}`);
+      console.log(`[Vehicle] Extract mislukt: ${e.message.substring(0, 80)}`);
     }
+
+    // Wacht 5 seconden voor volgende poging
     await page.waitForTimeout(5000);
+
+    // Log frame-wijzigingen
+    const currentFrames = page.frames().map(f => f.url()).filter(u => u !== 'about:blank');
+    console.log(`[Vehicle] Huidige frames: ${currentFrames.join(', ')}`);
   }
 
   if (!vehicleData) {
-    // Uitgebreide debug logging
-    console.log('[Vehicle] === DEBUG: Alle frame-inhouden ===');
+    console.log('[Vehicle] === FAILED: Alle frame-inhouden na timeout ===');
     for (const f of page.frames()) {
       try {
         const text = await f.evaluate(() => (document.body?.innerText || '').substring(0, 500));
@@ -232,7 +247,7 @@ async function searchAndExtractVehicle(page, kenteken) {
       } catch {}
     }
     await page.screenshot({ path: `vehicle-data-debug.png` });
-    throw new Error('Kon geen voertuiggegevens extraheren na 3 pogingen');
+    throw new Error('Kon geen voertuiggegevens extraheren (timeout na 60s)');
   }
 
   return vehicleData;
