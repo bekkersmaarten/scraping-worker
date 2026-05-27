@@ -80,73 +80,12 @@ async function login(page) {
   const currentUrl = page.url();
   console.log(`[Login] Huidige URL: ${currentUrl}`);
 
-  // Check of we ingelogd zijn (frames = Servicebox is geladen)
+  // Check of we ingelogd zijn (frameset = Servicebox is geladen)
   if (currentUrl.includes('loadPage.jsp') || currentUrl.includes('referer.jsp')) {
-    const hasFrames = await page.evaluate(() => {
-      return document.querySelectorAll('frame, iframe').length > 0 || document.title.includes('Service Box');
-    });
-    if (hasFrames) {
-      console.log('[Login] Al ingelogd (HTTP credentials werkten)');
-
-      // Log de frameset HTML zodat we zien welke frames er zouden moeten zijn
-      const framesetInfo = await page.evaluate(() => {
-        const frames = document.querySelectorAll('frame, iframe');
-        return Array.from(frames).map(f => ({
-          name: f.name || f.id || '(unnamed)',
-          src: f.src || '(no src)',
-          tagName: f.tagName
-        }));
-      });
-      console.log('[Login] Frameset structuur:', JSON.stringify(framesetInfo));
-
-      // Wacht tot ALLE frames geladen zijn
-      console.log('[Login] Wachten tot alle frames geladen zijn...');
-      await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-      await page.waitForTimeout(3000);
-
-      // Log welke frames er daadwerkelijk geladen zijn
-      const loadedFrames = page.frames().map(f => f.url());
-      console.log(`[Login] Geladen frames (${loadedFrames.length}): ${loadedFrames.join(', ')}`);
-
-      // Het hub-frame (frameHub) laadt soms niet op Railway (blijft about:blank).
-      // Fix: forceer het laden door src opnieuw te zetten via JavaScript.
-      const hubFrameAboutBlank = page.frames().find(f => f.url() === 'about:blank' || f.url() === '');
-      if (hubFrameAboutBlank) {
-        console.log('[Login] Hub-frame is about:blank — forceer laden via src reset');
-        await page.evaluate(() => {
-          const hub = document.querySelector('frame[name="frameHub"]');
-          if (hub) {
-            // Reset de src om het frame opnieuw te laden
-            hub.src = '/do/loadFrameHub';
-          }
-        });
-
-        // Wacht tot het frame geladen is
-        await page.waitForTimeout(5000);
-        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-
-        const hubUrl = hubFrameAboutBlank.url();
-        console.log(`[Login] Hub-frame na src reset: ${hubUrl}`);
-
-        // Als het nog steeds about:blank is, probeer de volledige URL
-        if (hubUrl === 'about:blank' || hubUrl === '') {
-          console.log('[Login] Hub-frame laadt nog niet, probeer volledige URL...');
-          await page.evaluate(() => {
-            const hub = document.querySelector('frame[name="frameHub"]');
-            if (hub) hub.src = 'https://servicebox.mpsa.com/do/loadFrameHub';
-          });
-          await page.waitForTimeout(5000);
-          await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-          console.log(`[Login] Hub-frame (2e poging): ${hubFrameAboutBlank.url()}`);
-        }
-
-        // Log finale frames
-        const finalFrames = page.frames().map(f => f.url());
-        console.log(`[Login] Finale frames: ${finalFrames.join(', ')}`);
-      }
-
-      return;
-    }
+    console.log('[Login] Al ingelogd (HTTP credentials werkten)');
+    // We navigeren straks direct naar de juiste pagina's — frameset niet nodig
+    await page.waitForTimeout(2000);
+    return;
   }
 
   // SSO login formulier
@@ -192,89 +131,85 @@ async function searchAndExtractVehicle(page, kenteken) {
   const cleanKenteken = kenteken.replace(/-/g, '');
   console.log(`[Vehicle] Zoeken naar kenteken: ${cleanKenteken}`);
 
-  const frames = page.frames();
-  console.log(`[Vehicle] Aantal frames: ${frames.length}`);
+  // === DIRECT NAVIGATION: bypass frameset entirely ===
+  // Navigate to the hub page directly (where the search input lives)
+  console.log('[Vehicle] Direct navigeren naar loadFrameHub (bypass frameset)...');
+  await page.goto(`${SERVICEBOX_URL}/do/loadFrameHub`, {
+    waitUntil: 'networkidle',
+    timeout: 30000
+  });
+  await page.waitForTimeout(2000);
 
-  // Vind het zoekveld: input#short-vin[name="shortvin"][type="search"]
-  // Dit zit in het hub-frame (niet het socle frame)
-  let searchInput = null;
-  let targetFrame = null;
+  let searchInput = await page.$('input#short-vin, input[name="shortvin"]');
 
-  for (const frame of frames) {
-    try {
-      // Zoek specifiek het shortvin veld (type="search")
-      searchInput = await frame.$('input#short-vin, input[name="shortvin"]');
-      if (searchInput) {
-        targetFrame = frame;
-        break;
-      }
-    } catch (e) { continue; }
+  // Fallback: try the socle page if hub doesn't have the search field
+  if (!searchInput) {
+    console.log('[Vehicle] Zoekveld niet op hub, probeer socle...');
+    await page.goto(`${SERVICEBOX_URL}/socle/?start=true`, {
+      waitUntil: 'networkidle',
+      timeout: 30000
+    });
+    await page.waitForTimeout(2000);
+    searchInput = await page.$('input#short-vin, input[name="shortvin"]');
   }
 
   if (!searchInput) {
     await page.screenshot({ path: 'search-field-debug.png' });
-    throw new Error('Zoekveld (input#short-vin) niet gevonden in frames');
+    const bodyText = await page.evaluate(() => (document.body?.innerText || '').substring(0, 300));
+    console.log(`[Vehicle] Pagina-inhoud: ${bodyText}`);
+    throw new Error('Zoekveld (input#short-vin) niet gevonden');
   }
 
-  console.log(`[Vehicle] Zoekveld gevonden in frame: ${targetFrame.url()}`);
+  console.log(`[Vehicle] Zoekveld gevonden op: ${page.url()}`);
 
-  // Vul kenteken in en submit via JavaScript (bypassed frameset pointer interception)
-  console.log('[Vehicle] Kenteken invullen en submitten via JS...');
-  await targetFrame.evaluate((kent) => {
-    const input = document.querySelector('input#short-vin, input[name="shortvin"]');
-    if (!input) throw new Error('Zoekveld niet gevonden in frame');
-    input.value = kent;
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
+  // Fill in kenteken and submit
+  // Change form target to _self so results load in THIS page (not frameHub)
+  console.log('[Vehicle] Kenteken invullen en submitten...');
 
-    // Klik de OK button via JS (bypassed pointer event checks)
-    const okBtn = document.querySelector('input[name="VIN_OK_BUTTON"]');
-    if (okBtn) {
-      okBtn.click();
-    } else {
-      // Fallback: submit het formulier
+  const [navigation] = await Promise.all([
+    page.waitForNavigation({ timeout: 20000 }).catch(() => null),
+    page.evaluate((kent) => {
+      const input = document.querySelector('input#short-vin, input[name="shortvin"]');
+      if (!input) throw new Error('Zoekveld niet gevonden');
+
+      // Force form to load results in same page
       const form = input.closest('form');
-      if (form) form.submit();
-    }
-  }, cleanKenteken);
-  console.log(`[Vehicle] Kenteken ${cleanKenteken} ingevoerd en gesubmit via JS`);
+      if (form) {
+        form.removeAttribute('target');
+        form.target = '_self';
+      }
 
-  // Wacht op resultaten — de frameset herlaadt na de zoekopdracht
-  console.log('[Vehicle] Wachten op resultaten (10s)...');
-  await page.waitForTimeout(10000);
+      input.value = kent;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
 
-  // Log huidige frame-staat
-  for (const f of page.frames()) {
-    const url = f.url();
-    if (url !== 'about:blank') {
-      console.log(`[Vehicle] Frame: ${url.substring(0, 120)}`);
-    }
-  }
+      const okBtn = document.querySelector('input[name="VIN_OK_BUTTON"]');
+      if (okBtn) {
+        okBtn.click();
+      } else if (form) {
+        form.submit();
+      }
+    }, cleanKenteken)
+  ]);
 
-  // Probeer data te extraheren — 4 pogingen met 8s tussenpozen
+  console.log(`[Vehicle] Na submit URL: ${page.url()}`);
+  await page.waitForTimeout(5000);
+
+  // Extract vehicle data — 4 attempts
   let vehicleData = null;
   for (let attempt = 1; attempt <= 4; attempt++) {
     console.log(`[Vehicle] Poging ${attempt}/4 om voertuigdata te extraheren...`);
     vehicleData = await extractVehicleData(page, cleanKenteken);
     if (vehicleData) break;
 
-    console.log(`[Vehicle] Nog geen data, wacht 8s...`);
-    await page.waitForTimeout(8000);
+    console.log(`[Vehicle] Nog geen data, wacht 5s...`);
+    await page.waitForTimeout(5000);
   }
 
   if (!vehicleData) {
-    // Debug: log inhoud van alle frames
-    console.log('[Vehicle] === MISLUKT — frame-inhouden: ===');
-    for (const f of page.frames()) {
-      try {
-        const url = f.url();
-        const text = await f.evaluate(() => (document.body?.innerText || '').substring(0, 500));
-        if (text.length > 10) {
-          console.log(`[Vehicle] [${url.substring(0, 80)}]:`);
-          console.log(text.substring(0, 250));
-        }
-      } catch {}
-    }
+    console.log('[Vehicle] === MISLUKT — pagina-inhoud: ===');
+    const text = await page.evaluate(() => (document.body?.innerText || '').substring(0, 500));
+    console.log(text.substring(0, 300));
     await page.screenshot({ path: `vehicle-data-debug.png` });
     throw new Error('Kon geen voertuiggegevens extraheren');
   }
@@ -510,9 +445,10 @@ async function extractMaintenance(page, context, kmStand) {
   const pagesBefore = context.pages().map(p => p.url());
   console.log(`[Maintenance] Pages voor klik: ${pagesBefore.join(', ')}`);
 
-  // Roep goTo('/mp/') direct aan in het frame via JavaScript
-  // (de Quotelink link is een javascript: link die niet goed werkt met Playwright click)
+  // Roep goTo('/mp/') aan, of open Menu pricing URL direct als fallback
   let executed = false;
+
+  // Methode 1: goTo() functie beschikbaar in pagina of frames
   for (const frame of page.frames()) {
     try {
       const hasGoTo = await frame.evaluate(() => typeof goTo === 'function');
@@ -528,9 +464,47 @@ async function extractMaintenance(page, context, kmStand) {
     }
   }
 
+  // Methode 2: Zoek de Menu pricing link en haal URL op
   if (!executed) {
-    console.log('[Maintenance] goTo functie niet gevonden in frames');
-    return { intervals: [], prices: [] };
+    console.log('[Maintenance] goTo niet beschikbaar, zoeken naar Menu pricing link...');
+    const mpUrl = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll('a'));
+      for (const link of links) {
+        const text = (link.textContent || '').trim();
+        if (text.includes('Menu pricing') || text.includes('Quotelink') || text.includes('menu pricing')) {
+          const href = link.getAttribute('href') || '';
+          if (href && !href.startsWith('javascript:')) return href;
+          // Extract URL from onclick handler
+          const onclick = link.getAttribute('onclick') || href;
+          const goToMatch = onclick.match(/goTo\(['"]([^'"]+)['"]\)/);
+          if (goToMatch) return goToMatch[1];
+          const openMatch = onclick.match(/window\.open\(['"]([^'"]+)['"]/);
+          if (openMatch) return openMatch[1];
+        }
+      }
+      return null;
+    });
+
+    if (mpUrl) {
+      console.log(`[Maintenance] Menu pricing URL gevonden: ${mpUrl}`);
+      const fullUrl = mpUrl.startsWith('http') ? mpUrl : `${SERVICEBOX_URL}${mpUrl}`;
+      const mpPage = await context.newPage();
+      await mpPage.goto(fullUrl, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+      executed = true;
+    }
+  }
+
+  // Methode 3: Probeer /mp/ direct te openen
+  if (!executed) {
+    console.log('[Maintenance] Geen link gevonden, probeer /mp/ direct...');
+    try {
+      const mpPage = await context.newPage();
+      await mpPage.goto(`${SERVICEBOX_URL}/mp/`, { waitUntil: 'networkidle', timeout: 15000 });
+      executed = true;
+    } catch (e) {
+      console.log(`[Maintenance] /mp/ direct openen mislukt: ${e.message.substring(0, 100)}`);
+      return { intervals: [], prices: [] };
+    }
   }
 
   // Wacht tot de goTo() functie het popup-venster navigeert
