@@ -839,4 +839,66 @@ async function extractPricesByCategory(page) {
 // Prijzen ophalen per item (v2 — vereist diepere tree-interactie)
 // TODO: Leaf items aanklikken om prijzen uit offerte-tabel te lezen
 
-module.exports = { scrapeServicebox };
+// =========================================
+// VIN-ONLY QUOTELINK LOOKUP
+// =========================================
+/**
+ * Zoekt alleen service-intervallen + prijzen op via VIN (chassisnummer).
+ * Slaat recalls over en geeft alleen Quotelink/maintenance data terug.
+ *
+ * Flow:
+ * 1. Login op Servicebox (sessie nodig voor Quotelink)
+ * 2. Zoek op VIN via hetzelfde shortvin-veld
+ * 3. Extract basisvoertuigdata (indien beschikbaar)
+ * 4. Open Menu pricing / Quotelink
+ * 5. Extract intervallen + prijzen
+ */
+async function scrapeQuotelink(vin, kmStand) {
+  const headless = process.env.HEADLESS !== 'false';
+  const slowMo = parseInt(process.env.SLOW_MO || '0');
+
+  console.log(`[Quotelink] Start VIN lookup: ${vin}, km: ${kmStand || 'n.v.t.'}`);
+  console.log(`[Quotelink] Headless: ${headless}, SlowMo: ${slowMo}`);
+
+  const browser = await chromium.launch({ headless, slowMo });
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    httpCredentials: {
+      username: USERNAME,
+      password: PASSWORD
+    }
+  });
+
+  const page = await context.newPage();
+
+  try {
+    // STAP 1: Login
+    await login(page);
+
+    // STAP 2: Zoek voertuig op VIN (zelfde flow als kenteken)
+    const vehicleData = await searchAndExtractVehicle(page, vin);
+
+    // STAP 3: Skip recalls — ga direct naar Menu pricing
+    const { intervals, prices } = await extractMaintenance(page, context, kmStand);
+
+    console.log('[Quotelink] VIN lookup voltooid!');
+    return {
+      vehicle: vehicleData,
+      recalls: [],  // Niet opgehaald bij VIN-only lookup
+      intervals,
+      prices
+    };
+
+  } catch (error) {
+    console.error('[Quotelink] Error:', error.message);
+    try {
+      await page.screenshot({ path: `error-vin-${Date.now()}.png` });
+    } catch (e) { /* ignore */ }
+    throw error;
+  } finally {
+    await browser.close();
+  }
+}
+
+module.exports = { scrapeServicebox, scrapeQuotelink };

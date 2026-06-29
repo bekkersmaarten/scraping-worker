@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const { scrapeServicebox } = require('./scraper');
+const { scrapeServicebox, scrapeQuotelink } = require('./scraper');
 
 const app = express();
 app.use(express.json());
@@ -18,7 +18,7 @@ app.get('/health', (req, res) => {
  * Wordt aangeroepen door de Supabase Edge Function (start-lookup).
  * Start de scrape asynchroon en stuurt resultaten terug via callback.
  *
- * Body:
+ * Body (kenteken lookup — volledig):
  * {
  *   "lookup_id": "uuid",
  *   "kenteken": "KR342F",
@@ -26,27 +26,42 @@ app.get('/health', (req, res) => {
  *   "callback_url": "https://xxx.supabase.co/functions/v1/worker-callback",
  *   "callback_secret": "secret"
  * }
+ *
+ * Body (VIN lookup — alleen intervallen + prijzen):
+ * {
+ *   "lookup_id": "uuid",
+ *   "vin": "W0L000000Y2000001",
+ *   "km_stand": 34000,
+ *   "callback_url": "...",
+ *   "callback_secret": "secret"
+ * }
  */
 app.post('/scrape', async (req, res) => {
-  const { lookup_id, kenteken, km_stand, callback_url, callback_secret } = req.body;
+  const { lookup_id, kenteken, vin, km_stand, callback_url, callback_secret } = req.body;
 
-  if (!lookup_id || !kenteken) {
-    return res.status(400).json({ error: 'lookup_id en kenteken zijn verplicht' });
+  if (!lookup_id || (!kenteken && !vin)) {
+    return res.status(400).json({ error: 'lookup_id en kenteken of vin zijn verplicht' });
   }
+
+  const searchType = kenteken ? 'kenteken' : 'vin';
+  const searchValue = kenteken || vin;
 
   console.log(`\n========================================`);
   console.log(`[Server] Nieuwe scrape request ontvangen`);
   console.log(`[Server] Lookup ID: ${lookup_id}`);
-  console.log(`[Server] Kenteken: ${kenteken}`);
+  console.log(`[Server] Type: ${searchType.toUpperCase()}`);
+  console.log(`[Server] ${searchType}: ${searchValue}`);
   console.log(`[Server] KM-stand: ${km_stand || 'n.v.t.'}`);
   console.log(`========================================\n`);
 
   // Stuur meteen 200 terug — scraping draait op de achtergrond
-  res.json({ status: 'accepted', lookup_id });
+  res.json({ status: 'accepted', lookup_id, type: searchType });
 
   // Start de scrape asynchroon
   try {
-    const result = await scrapeServicebox(kenteken, km_stand);
+    const result = kenteken
+      ? await scrapeServicebox(kenteken, km_stand)
+      : await scrapeQuotelink(vin, km_stand);
 
     console.log('[Server] Scrape voltooid, resultaat terugsturen naar callback...');
 
@@ -104,6 +119,6 @@ app.post('/scrape', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`\n🚗 Servicebox Scraping Worker draait op http://localhost:${PORT}`);
-  console.log(`   POST /scrape  — Start een nieuwe kenteken lookup`);
+  console.log(`   POST /scrape  — Start een lookup (kenteken of VIN)`);
   console.log(`   GET  /health  — Health check\n`);
 });
