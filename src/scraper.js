@@ -52,10 +52,10 @@ async function scrapeServicebox(kenteken, kmStand) {
     const recalls = await extractRecalls(page);
 
     // STAP 4: Ga terug naar Auto tab, klik Menu pricing → extract onderhoud
-    const { intervals, prices } = await extractMaintenance(page, context, kmStand);
+    const { intervals, interval_pricing, prices } = await extractMaintenance(page, context, kmStand);
 
     console.log('[Scraper] Scrape voltooid!');
-    return { vehicle: vehicleData, recalls, intervals, prices };
+    return { vehicle: vehicleData, recalls, intervals, interval_pricing, prices };
 
   } catch (error) {
     console.error('[Scraper] Error:', error.message);
@@ -576,13 +576,16 @@ async function extractMaintenance(page, context, kmStand) {
   // Extract intervallen
   const intervals = await extractIntervals(menuPricingPage);
 
-  // Extract prijzen door categorieën door te klikken
+  // Extract prijzen PER INTERVAL (klik elk interval, lees offerte-tabel)
+  const interval_pricing = await extractPricesPerInterval(menuPricingPage, intervals);
+
+  // Extract de volledige servicecatalogus (alle beschikbare items)
   const prices = await extractPricesByCategory(menuPricingPage);
 
   // Sluit popup
   await menuPricingPage.close();
 
-  return { intervals, prices };
+  return { intervals, interval_pricing, prices };
 }
 
 async function extractIntervals(page) {
@@ -659,6 +662,222 @@ async function extractIntervals(page) {
   intervals.sort((a, b) => a.sort - b.sort);
   console.log(`[Intervals] ${intervals.length} intervallen gevonden`);
   return intervals;
+}
+
+// =========================================
+// PRIJZEN PER INTERVAL
+// =========================================
+/**
+ * Klikt elk interval (30K, 60K, etc.) aan en leest de resulterende
+ * offerte/prijstabel uit. In Quotelink worden prijzen server-side berekend
+ * nadat je een interval selecteert.
+ *
+ * Returns: [{ interval: "30.000 KM", items: [...], total_labor, total_parts, total_price }]
+ */
+async function extractPricesPerInterval(page, intervals) {
+  console.log(`[IntervalPricing] Prijzen ophalen voor ${intervals.length} intervallen...`);
+
+  const results = [];
+  const framesToUse = page.frames().length > 1 ? page.frames() : [page.mainFrame()];
+
+  for (const interval of intervals) {
+    console.log(`[IntervalPricing] Klik interval: ${interval.label}`);
+
+    // Klik op het interval-element
+    let clicked = false;
+    for (const frame of framesToUse) {
+      try {
+        // Zoek het klikbare element met de intervaltekst
+        const elements = await frame.$$('a, button, span, td, option, label, div, li');
+        for (const el of elements) {
+          const text = (await el.textContent()).trim();
+          // Match exacte interval-label of km-waarde
+          const kmNum = interval.label.replace(/[.\s]?000\s*KM$/i, '');
+          if (text === interval.label ||
+              text.includes(kmNum + '.000') ||
+              text.includes(kmNum + ' 000') ||
+              (interval.type === 'yearly' && /jaarlijks/i.test(text))) {
+            await el.click();
+            clicked = true;
+            break;
+          }
+        }
+        if (clicked) break;
+      } catch (e) { continue; }
+    }
+
+    if (!clicked) {
+      console.log(`[IntervalPricing] Kon interval ${interval.label} niet aanklikken`);
+      continue;
+    }
+
+    // Wacht op server-side berekening (AJAX)
+    await page.waitForTimeout(3000);
+    await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+
+    // Extract de prijsdata uit de offerte-tabel / rechter paneel
+    let pricing = null;
+    for (const frame of framesToUse) {
+      try {
+        pricing = await frame.evaluate(() => {
+          function clean(t) { return (t || '').replace(/[\n\t\r]+/g, ' ').replace(/\s{2,}/g, ' ').trim(); }
+
+          // Zoek prijzen in tabellen
+          const items = [];
+          let totalLabor = null;
+          let totalParts = null;
+          let totalPrice = null;
+
+          // === STRATEGIE 1: Zoek offerte-tabel (table met bedragen) ===
+          const tables = document.querySelectorAll('table');
+          for (const table of tables) {
+            const rows = table.querySelectorAll('tr');
+            for (const row of rows) {
+              const cells = Array.from(row.querySelectorAll('td, th'));
+              const texts = cells.map(c => clean(c.textContent));
+
+              // Zoek rijen met prijzen (€ of decimale bedragen)
+              const pricePattern = /(\d+[.,]\d{2})\s*€?|€\s*(\d+[.,]\d{2})/;
+              const hasPrices = texts.some(t => pricePattern.test(t));
+
+              if (hasPrices && texts.length >= 2) {
+                // Dit is een prijsrij — eerste cel is naam, rest zijn bedragen
+                const name = texts[0];
+                const prices = texts.slice(1).map(t => {
+                  const match = t.match(/(\d+[.,]\d{2})/);
+                  return match ? parseFloat(match[1].replace(',', '.')) : null;
+                }).filter(p => p !== null);
+
+                if (name && prices.length > 0) {
+                  items.push({
+                    name: name,
+                    prices: prices,
+                    labor: prices[0] || 0,
+                    parts: prices[1] || 0,
+                    total: prices[prices.length - 1] || 0
+                  });
+                }
+              }
+
+              // Zoek totaalrij
+              const rowText = clean(row.textContent).toLowerCase();
+              if (rowText.includes('totaal') || rowText.includes('total')) {
+                const allPrices = texts.map(t => {
+                  const m = t.match(/(\d+[.,]\d{2})/);
+                  return m ? parseFloat(m[1].replace(',', '.')) : null;
+                }).filter(p => p !== null);
+                if (allPrices.length > 0) {
+                  totalPrice = allPrices[allPrices.length - 1];
+                  if (allPrices.length >= 2) {
+                    totalLabor = allPrices[0];
+                    totalParts = allPrices.length >= 3 ? allPrices[1] : null;
+                  }
+                }
+              }
+            }
+          }
+
+          // === STRATEGIE 2: Zoek geselecteerde/aangevinkte items ===
+          if (items.length === 0) {
+            // Zoek checkboxes die aangevinkt zijn + bijbehorende tekst
+            const checked = document.querySelectorAll('input[type="checkbox"]:checked');
+            for (const cb of checked) {
+              const parent = cb.closest('tr, div, li, label');
+              if (parent) {
+                const text = clean(parent.textContent);
+                const priceMatch = text.match(/(\d+[.,]\d{2})/);
+                if (text.length > 2) {
+                  items.push({
+                    name: text.replace(/(\d+[.,]\d{2})/g, '').trim(),
+                    total: priceMatch ? parseFloat(priceMatch[1].replace(',', '.')) : 0
+                  });
+                }
+              }
+            }
+          }
+
+          // === STRATEGIE 3: Zoek losse prijs-elementen ===
+          if (items.length === 0) {
+            // Zoek divs/spans met prijzen
+            const allEls = document.querySelectorAll('div, span, td, p');
+            for (const el of allEls) {
+              const text = clean(el.textContent);
+              // Zoek "Totaal: € 123,45" of "Total: 123.45 €"
+              if (/totaa?l/i.test(text)) {
+                const m = text.match(/(\d+[.,]\d{2})/);
+                if (m) totalPrice = parseFloat(m[1].replace(',', '.'));
+              }
+            }
+          }
+
+          // === STRATEGIE 4: Zoek in de offerte/quote samenvatting ===
+          if (items.length === 0 && !totalPrice) {
+            // Zoek specifieke Quotelink elementen
+            const summaryEls = document.querySelectorAll(
+              '.quote-summary, .offerte, .pricing-summary, ' +
+              '[class*="price"], [class*="total"], [class*="summary"], ' +
+              '[id*="price"], [id*="total"], [id*="quote"]'
+            );
+            for (const el of summaryEls) {
+              const text = clean(el.textContent);
+              if (text.length > 2 && text.length < 500) {
+                const m = text.match(/(\d+[.,]\d{2})/);
+                if (m) {
+                  items.push({ name: text.substring(0, 100), total: parseFloat(m[1].replace(',', '.')) });
+                }
+              }
+            }
+          }
+
+          // Debug: log page state
+          const bodyText = (document.body?.innerText || '').substring(0, 2000);
+          const hasPriceOnPage = /\d+[.,]\d{2}/.test(bodyText);
+
+          return {
+            items,
+            total_labor: totalLabor,
+            total_parts: totalParts,
+            total_price: totalPrice,
+            _debug: {
+              items_found: items.length,
+              has_price_on_page: hasPriceOnPage,
+              page_text_preview: bodyText.substring(0, 500)
+            }
+          };
+        });
+
+        if (pricing && (pricing.items.length > 0 || pricing.total_price)) break;
+      } catch (e) { continue; }
+    }
+
+    if (pricing) {
+      console.log(`[IntervalPricing] ${interval.label}: ${pricing.items.length} items, totaal: ${pricing.total_price || 'onbekend'}`);
+      if (pricing.items.length === 0 && !pricing.total_price) {
+        console.log(`[IntervalPricing] Debug: ${pricing._debug.page_text_preview.substring(0, 200)}`);
+      }
+      results.push({
+        interval: interval.label,
+        interval_type: interval.type,
+        items: pricing.items,
+        total_labor: pricing.total_labor,
+        total_parts: pricing.total_parts,
+        total_price: pricing.total_price
+      });
+    } else {
+      console.log(`[IntervalPricing] ${interval.label}: geen data gevonden`);
+      results.push({
+        interval: interval.label,
+        interval_type: interval.type,
+        items: [],
+        total_labor: null,
+        total_parts: null,
+        total_price: null
+      });
+    }
+  }
+
+  console.log(`[IntervalPricing] Klaar: ${results.length} intervallen verwerkt`);
+  return results;
 }
 
 /**
@@ -880,13 +1099,14 @@ async function scrapeQuotelink(vin, kmStand) {
     const vehicleData = await searchAndExtractVehicle(page, vin);
 
     // STAP 3: Skip recalls — ga direct naar Menu pricing
-    const { intervals, prices } = await extractMaintenance(page, context, kmStand);
+    const { intervals, interval_pricing, prices } = await extractMaintenance(page, context, kmStand);
 
     console.log('[Quotelink] VIN lookup voltooid!');
     return {
       vehicle: vehicleData,
       recalls: [],  // Niet opgehaald bij VIN-only lookup
       intervals,
+      interval_pricing,
       prices
     };
 
