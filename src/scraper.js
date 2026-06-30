@@ -728,6 +728,8 @@ async function extractPricesPerInterval(page, intervals) {
           let totalParts = null;
           let totalPrice = null;
 
+          let strategy = 'none';
+
           // === STRATEGIE 1: Zoek offerte-tabel (table met bedragen) ===
           const tables = document.querySelectorAll('table');
           for (const table of tables) {
@@ -749,6 +751,7 @@ async function extractPricesPerInterval(page, intervals) {
                 }).filter(p => p !== null);
 
                 if (name && prices.length > 0) {
+                  strategy = 'table_prices';
                   items.push({
                     name: name,
                     prices: prices,
@@ -787,6 +790,7 @@ async function extractPricesPerInterval(page, intervals) {
                 const text = clean(parent.textContent);
                 const priceMatch = text.match(/(\d+[.,]\d{2})/);
                 if (text.length > 2) {
+                  strategy = 'checked_checkboxes';
                   items.push({
                     name: text.replace(/(\d+[.,]\d{2})/g, '').trim(),
                     total: priceMatch ? parseFloat(priceMatch[1].replace(',', '.')) : 0
@@ -839,6 +843,7 @@ async function extractPricesPerInterval(page, intervals) {
             total_parts: totalParts,
             total_price: totalPrice,
             _debug: {
+              strategy,
               items_found: items.length,
               has_price_on_page: hasPriceOnPage,
               page_text_preview: bodyText.substring(0, 500)
@@ -852,9 +857,15 @@ async function extractPricesPerInterval(page, intervals) {
 
     if (pricing) {
       console.log(`[IntervalPricing] ${interval.label}: ${pricing.items.length} items, totaal: ${pricing.total_price || 'onbekend'}`);
-      if (pricing.items.length === 0 && !pricing.total_price) {
-        console.log(`[IntervalPricing] Debug: ${pricing._debug.page_text_preview.substring(0, 200)}`);
+      // Altijd debug loggen zodat we zien wat er op de pagina staat
+      if (pricing.items.length > 0) {
+        console.log(`[IntervalPricing] Items gevonden:`);
+        for (const item of pricing.items.slice(0, 5)) {
+          console.log(`[IntervalPricing]   - "${item.name?.substring(0, 80)}" => labor:${item.labor}, parts:${item.parts}, total:${item.total}`);
+        }
       }
+      console.log(`[IntervalPricing] Debug page text: ${(pricing._debug?.page_text_preview || '').substring(0, 300)}`);
+      console.log(`[IntervalPricing] Has price on page: ${pricing._debug?.has_price_on_page}, strategy: ${pricing._debug?.strategy}`);
       results.push({
         interval: interval.label,
         interval_type: interval.type,
