@@ -722,157 +722,159 @@ async function extractPricesPerInterval(page, intervals) {
         pricing = await frame.evaluate(() => {
           function clean(t) { return (t || '').replace(/[\n\t\r]+/g, ' ').replace(/\s{2,}/g, ' ').trim(); }
 
+          const bodyText = (document.body?.innerText || '').substring(0, 2000);
+
+          // === CHECK: "NIET geprijsd" melding = dealer heeft geen prijzen geconfigureerd ===
+          const notPriced = bodyText.includes('NIET geprijsd') || bodyText.includes('niet geprijsd');
+
           // Zoek prijzen in tabellen
           const items = [];
           let totalLabor = null;
           let totalParts = null;
           let totalPrice = null;
-
           let strategy = 'none';
 
-          // === STRATEGIE 1: Zoek offerte-tabel (table met bedragen) ===
-          const tables = document.querySelectorAll('table');
-          for (const table of tables) {
-            const rows = table.querySelectorAll('tr');
-            for (const row of rows) {
-              const cells = Array.from(row.querySelectorAll('td, th'));
-              const texts = cells.map(c => clean(c.textContent));
+          // Alleen zoeken als er daadwerkelijk prijzen op de pagina staan
+          // Strikte prijscheck: moet € teken bevatten OF een bedrag > 1,00
+          const strictPricePattern = /€\s*\d+[.,]\d{2}|\d+[.,]\d{2}\s*€/;
+          const hasRealPrices = strictPricePattern.test(bodyText);
 
-              // Zoek rijen met prijzen (€ of decimale bedragen)
-              const pricePattern = /(\d+[.,]\d{2})\s*€?|€\s*(\d+[.,]\d{2})/;
-              const hasPrices = texts.some(t => pricePattern.test(t));
+          if (hasRealPrices && !notPriced) {
+            // === STRATEGIE 1: Zoek offerte-tabel (table met bedragen) ===
+            const tables = document.querySelectorAll('table');
+            for (const table of tables) {
+              const rows = table.querySelectorAll('tr');
+              for (const row of rows) {
+                const cells = Array.from(row.querySelectorAll('td, th'));
+                const texts = cells.map(c => clean(c.textContent));
 
-              if (hasPrices && texts.length >= 2) {
-                // Dit is een prijsrij — eerste cel is naam, rest zijn bedragen
-                const name = texts[0];
-                const prices = texts.slice(1).map(t => {
-                  const match = t.match(/(\d+[.,]\d{2})/);
-                  return match ? parseFloat(match[1].replace(',', '.')) : null;
-                }).filter(p => p !== null);
+                // Zoek rijen met echte prijzen (€ teken vereist, of bedrag > 1.00)
+                const hasPrices = texts.some(t => {
+                  if (strictPricePattern.test(t)) return true;
+                  const m = t.match(/^(\d+[.,]\d{2})$/);
+                  return m && parseFloat(m[1].replace(',', '.')) > 1.0;
+                });
 
-                if (name && prices.length > 0) {
-                  strategy = 'table_prices';
-                  items.push({
-                    name: name,
-                    prices: prices,
-                    labor: prices[0] || 0,
-                    parts: prices[1] || 0,
-                    total: prices[prices.length - 1] || 0
-                  });
+                if (hasPrices && texts.length >= 2) {
+                  const name = texts[0];
+                  // Filter: naam moet een echte service-naam zijn
+                  if (!name || name.length < 3 || name.length > 200) continue;
+                  if (name.startsWith('<!--') || name.includes('//') || name.includes('Filter:')) continue;
+                  if (/^(Klanttype|POC|theTreeState|function|var |let |const )/.test(name)) continue;
+
+                  const prices = texts.slice(1).map(t => {
+                    const match = t.match(/(\d+[.,]\d{2})/);
+                    if (!match) return null;
+                    const val = parseFloat(match[1].replace(',', '.'));
+                    return val > 1.0 ? val : null; // Filter sub-euro "prijzen"
+                  }).filter(p => p !== null);
+
+                  if (name && prices.length > 0) {
+                    strategy = 'table_prices';
+                    items.push({
+                      name: name,
+                      labor: prices[0] || 0,
+                      parts: prices[1] || 0,
+                      total: prices[prices.length - 1] || 0
+                    });
+                  }
                 }
-              }
 
-              // Zoek totaalrij
-              const rowText = clean(row.textContent).toLowerCase();
-              if (rowText.includes('totaal') || rowText.includes('total')) {
-                const allPrices = texts.map(t => {
-                  const m = t.match(/(\d+[.,]\d{2})/);
-                  return m ? parseFloat(m[1].replace(',', '.')) : null;
-                }).filter(p => p !== null);
-                if (allPrices.length > 0) {
-                  totalPrice = allPrices[allPrices.length - 1];
-                  if (allPrices.length >= 2) {
-                    totalLabor = allPrices[0];
-                    totalParts = allPrices.length >= 3 ? allPrices[1] : null;
+                // Zoek totaalrij
+                const rowText = clean(row.textContent).toLowerCase();
+                if (rowText.includes('totaal') || rowText.includes('total')) {
+                  const allPrices = texts.map(t => {
+                    const m = t.match(/(\d+[.,]\d{2})/);
+                    if (!m) return null;
+                    const val = parseFloat(m[1].replace(',', '.'));
+                    return val > 1.0 ? val : null;
+                  }).filter(p => p !== null);
+                  if (allPrices.length > 0) {
+                    totalPrice = allPrices[allPrices.length - 1];
+                    if (allPrices.length >= 2) {
+                      totalLabor = allPrices[0];
+                      totalParts = allPrices.length >= 3 ? allPrices[1] : null;
+                    }
                   }
                 }
               }
             }
-          }
 
-          // === STRATEGIE 2: Zoek geselecteerde/aangevinkte items ===
-          if (items.length === 0) {
-            // Zoek checkboxes die aangevinkt zijn + bijbehorende tekst
-            const checked = document.querySelectorAll('input[type="checkbox"]:checked');
-            for (const cb of checked) {
-              const parent = cb.closest('tr, div, li, label');
-              if (parent) {
-                const text = clean(parent.textContent);
-                const priceMatch = text.match(/(\d+[.,]\d{2})/);
-                if (text.length > 2) {
-                  strategy = 'checked_checkboxes';
-                  items.push({
-                    name: text.replace(/(\d+[.,]\d{2})/g, '').trim(),
-                    total: priceMatch ? parseFloat(priceMatch[1].replace(',', '.')) : 0
-                  });
+            // === STRATEGIE 2: Zoek geselecteerde/aangevinkte items met prijzen ===
+            if (items.length === 0) {
+              const checked = document.querySelectorAll('input[type="checkbox"]:checked');
+              for (const cb of checked) {
+                const parent = cb.closest('tr, div, li, label');
+                if (parent) {
+                  const text = clean(parent.textContent);
+                  if (text.length < 3 || text.length > 300) continue;
+                  if (text.startsWith('<!--') || text.includes('//')) continue;
+                  const priceMatch = text.match(/(\d+[.,]\d{2})/);
+                  const price = priceMatch ? parseFloat(priceMatch[1].replace(',', '.')) : 0;
+                  if (price > 1.0) {
+                    strategy = 'checked_checkboxes';
+                    items.push({
+                      name: text.replace(/(\d+[.,]\d{2})/g, '').trim(),
+                      total: price
+                    });
+                  }
+                }
+              }
+            }
+
+            // === STRATEGIE 3: Zoek totaalbedrag ===
+            if (items.length === 0 && !totalPrice) {
+              const allEls = document.querySelectorAll('div, span, td, p');
+              for (const el of allEls) {
+                const text = clean(el.textContent);
+                if (/totaa?l/i.test(text) && strictPricePattern.test(text)) {
+                  const m = text.match(/(\d+[.,]\d{2})/);
+                  if (m) totalPrice = parseFloat(m[1].replace(',', '.'));
                 }
               }
             }
           }
-
-          // === STRATEGIE 3: Zoek losse prijs-elementen ===
-          if (items.length === 0) {
-            // Zoek divs/spans met prijzen
-            const allEls = document.querySelectorAll('div, span, td, p');
-            for (const el of allEls) {
-              const text = clean(el.textContent);
-              // Zoek "Totaal: € 123,45" of "Total: 123.45 €"
-              if (/totaa?l/i.test(text)) {
-                const m = text.match(/(\d+[.,]\d{2})/);
-                if (m) totalPrice = parseFloat(m[1].replace(',', '.'));
-              }
-            }
-          }
-
-          // === STRATEGIE 4: Zoek in de offerte/quote samenvatting ===
-          if (items.length === 0 && !totalPrice) {
-            // Zoek specifieke Quotelink elementen
-            const summaryEls = document.querySelectorAll(
-              '.quote-summary, .offerte, .pricing-summary, ' +
-              '[class*="price"], [class*="total"], [class*="summary"], ' +
-              '[id*="price"], [id*="total"], [id*="quote"]'
-            );
-            for (const el of summaryEls) {
-              const text = clean(el.textContent);
-              if (text.length > 2 && text.length < 500) {
-                const m = text.match(/(\d+[.,]\d{2})/);
-                if (m) {
-                  items.push({ name: text.substring(0, 100), total: parseFloat(m[1].replace(',', '.')) });
-                }
-              }
-            }
-          }
-
-          // Debug: log page state
-          const bodyText = (document.body?.innerText || '').substring(0, 2000);
-          const hasPriceOnPage = /\d+[.,]\d{2}/.test(bodyText);
 
           return {
             items,
             total_labor: totalLabor,
             total_parts: totalParts,
             total_price: totalPrice,
+            not_priced: notPriced,
             _debug: {
               strategy,
               items_found: items.length,
-              has_price_on_page: hasPriceOnPage,
+              has_real_prices: hasRealPrices,
+              not_priced: notPriced,
               page_text_preview: bodyText.substring(0, 500)
             }
           };
         });
 
-        if (pricing && (pricing.items.length > 0 || pricing.total_price)) break;
+        if (pricing && (pricing.items.length > 0 || pricing.total_price || pricing.not_priced)) break;
       } catch (e) { continue; }
     }
 
     if (pricing) {
-      console.log(`[IntervalPricing] ${interval.label}: ${pricing.items.length} items, totaal: ${pricing.total_price || 'onbekend'}`);
-      // Altijd debug loggen zodat we zien wat er op de pagina staat
-      if (pricing.items.length > 0) {
-        console.log(`[IntervalPricing] Items gevonden:`);
-        for (const item of pricing.items.slice(0, 5)) {
-          console.log(`[IntervalPricing]   - "${item.name?.substring(0, 80)}" => labor:${item.labor}, parts:${item.parts}, total:${item.total}`);
+      if (pricing.not_priced) {
+        console.log(`[IntervalPricing] ${interval.label}: NIET GEPRIJSD (dealer heeft geen prijzen geconfigureerd)`);
+      } else if (pricing.items.length > 0) {
+        console.log(`[IntervalPricing] ${interval.label}: ${pricing.items.length} items, totaal: ${pricing.total_price || 'onbekend'}, strategy: ${pricing._debug?.strategy}`);
+        for (const item of pricing.items.slice(0, 3)) {
+          console.log(`[IntervalPricing]   - "${item.name?.substring(0, 60)}" => €${item.total}`);
         }
+      } else {
+        console.log(`[IntervalPricing] ${interval.label}: geen prijzen gevonden`);
+        console.log(`[IntervalPricing] Debug: realPrices=${pricing._debug?.has_real_prices}, text=${(pricing._debug?.page_text_preview || '').substring(0, 150)}`);
       }
-      console.log(`[IntervalPricing] Debug page text: ${(pricing._debug?.page_text_preview || '').substring(0, 300)}`);
-      console.log(`[IntervalPricing] Has price on page: ${pricing._debug?.has_price_on_page}, strategy: ${pricing._debug?.strategy}`);
       results.push({
         interval: interval.label,
         interval_type: interval.type,
         items: pricing.items,
         total_labor: pricing.total_labor,
         total_parts: pricing.total_parts,
-        total_price: pricing.total_price
+        total_price: pricing.total_price,
+        not_priced: pricing.not_priced || false
       });
     } else {
       console.log(`[IntervalPricing] ${interval.label}: geen data gevonden`);
