@@ -7,9 +7,51 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 
+// =========================================
+// QUEUE: max 1 scrape tegelijk
+// Chromium is te zwaar om meerdere browsers tegelijk te draaien
+// =========================================
+const queue = [];
+let isProcessing = false;
+
+function enqueue(job) {
+  return new Promise((resolve, reject) => {
+    queue.push({ job, resolve, reject });
+    console.log(`[Queue] Job toegevoegd, ${queue.length} in wachtrij`);
+    processQueue();
+  });
+}
+
+async function processQueue() {
+  if (isProcessing || queue.length === 0) return;
+
+  isProcessing = true;
+  const { job, resolve, reject } = queue.shift();
+  console.log(`[Queue] Start job, nog ${queue.length} in wachtrij`);
+
+  try {
+    const result = await job();
+    resolve(result);
+  } catch (error) {
+    reject(error);
+  } finally {
+    isProcessing = false;
+    // Verwerk volgende job
+    if (queue.length > 0) {
+      console.log(`[Queue] Volgende job starten...`);
+      processQueue();
+    }
+  }
+}
+
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    queue_length: queue.length,
+    is_processing: isProcessing
+  });
 });
 
 /**
@@ -52,16 +94,19 @@ app.post('/scrape', async (req, res) => {
   console.log(`[Server] Type: ${searchType.toUpperCase()}`);
   console.log(`[Server] ${searchType}: ${searchValue}`);
   console.log(`[Server] KM-stand: ${km_stand || 'n.v.t.'}`);
+  console.log(`[Server] Wachtrij: ${queue.length} jobs wachtend, verwerking: ${isProcessing}`);
   console.log(`========================================\n`);
 
-  // Stuur meteen 200 terug — scraping draait op de achtergrond
-  res.json({ status: 'accepted', lookup_id, type: searchType });
+  // Stuur meteen 200 terug — scraping wordt in de queue gezet
+  res.json({ status: 'accepted', lookup_id, type: searchType, queue_position: queue.length });
 
-  // Start de scrape asynchroon
+  // Voeg toe aan queue (max 1 browser tegelijk)
   try {
-    const result = kenteken
-      ? await scrapeServicebox(kenteken, km_stand)
-      : await scrapeQuotelink(vin, km_stand);
+    const result = await enqueue(async () => {
+      return kenteken
+        ? await scrapeServicebox(kenteken, km_stand)
+        : await scrapeQuotelink(vin, km_stand);
+    });
 
     console.log('[Server] Scrape voltooid, resultaat terugsturen naar callback...');
 
@@ -120,5 +165,6 @@ app.post('/scrape', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`\n🚗 Servicebox Scraping Worker draait op http://localhost:${PORT}`);
   console.log(`   POST /scrape  — Start een lookup (kenteken of VIN)`);
-  console.log(`   GET  /health  — Health check\n`);
+  console.log(`   GET  /health  — Health check`);
+  console.log(`   Max 1 gelijktijdige scrape (queue-systeem)\n`);
 });

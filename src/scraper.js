@@ -74,7 +74,14 @@ async function scrapeServicebox(kenteken, kmStand) {
 // =========================================
 async function login(page) {
   console.log('[Login] Navigeren naar Servicebox...');
-  await page.goto(SERVICEBOX_URL, { waitUntil: 'networkidle', timeout: 30000 });
+  // Probeer eerst met networkidle, fallback naar domcontentloaded
+  try {
+    await page.goto(SERVICEBOX_URL, { waitUntil: 'networkidle', timeout: 45000 });
+  } catch (e) {
+    console.log(`[Login] Eerste poging timeout, retry met domcontentloaded...`);
+    await page.goto(SERVICEBOX_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(5000);
+  }
   await page.waitForTimeout(2000);
 
   const currentUrl = page.url();
