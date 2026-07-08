@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const { scrapeServicebox, scrapeQuotelink } = require('./scraper');
+const { scrapeServicebox, scrapeQuotelink, activateWarranty } = require('./scraper');
 
 const app = express();
 app.use(express.json());
@@ -162,9 +162,112 @@ app.post('/scrape', async (req, res) => {
   }
 });
 
+/**
+ * POST /activate-warranty
+ *
+ * Activeert 2+6 jaar speciale garantie voor een voertuig.
+ *
+ * Body:
+ * {
+ *   "lookup_id": "uuid",
+ *   "vin": "VXKUPHPY9S4259523",
+ *   "km_stand": 45000,
+ *   "customer_email": "klant@example.com",
+ *   "callback_url": "https://xxx.supabase.co/functions/v1/worker-callback",
+ *   "callback_secret": "secret"
+ * }
+ */
+app.post('/activate-warranty', async (req, res) => {
+  const { lookup_id, vin, km_stand, customer_email, callback_url, callback_secret } = req.body;
+
+  if (!lookup_id || !vin) {
+    return res.status(400).json({ error: 'lookup_id en vin zijn verplicht' });
+  }
+
+  if (!km_stand) {
+    return res.status(400).json({ error: 'km_stand is verplicht' });
+  }
+
+  if (!customer_email) {
+    return res.status(400).json({ error: 'customer_email is verplicht' });
+  }
+
+  console.log(`\n========================================`);
+  console.log(`[Server] Warranty activatie request ontvangen`);
+  console.log(`[Server] Lookup ID: ${lookup_id}`);
+  console.log(`[Server] VIN: ${vin}`);
+  console.log(`[Server] KM-stand: ${km_stand}`);
+  console.log(`[Server] Email: ***`);
+  console.log(`[Server] Wachtrij: ${queue.length} jobs wachtend, verwerking: ${isProcessing}`);
+  console.log(`========================================\n`);
+
+  // Stuur meteen 200 terug — activatie wordt in de queue gezet
+  res.json({ status: 'accepted', lookup_id, type: 'warranty', queue_position: queue.length });
+
+  // Voeg toe aan queue (max 1 browser tegelijk)
+  try {
+    const result = await enqueue(async () => {
+      return await activateWarranty(vin, km_stand, customer_email);
+    });
+
+    console.log(`[Server] Warranty activatie voltooid: ${result.status}`);
+
+    // Stuur resultaat terug naar Supabase via callback URL
+    if (callback_url) {
+      const callbackResponse = await fetch(callback_url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-callback-secret': callback_secret || process.env.CALLBACK_SECRET || ''
+        },
+        body: JSON.stringify({
+          lookup_id,
+          status: result.status === 'activated' ? 'completed' : result.status,
+          data: result
+        })
+      });
+
+      if (!callbackResponse.ok) {
+        const errorText = await callbackResponse.text();
+        console.error(`[Server] Callback failed: ${callbackResponse.status} - ${errorText}`);
+      } else {
+        console.log('[Server] Warranty callback succesvol verstuurd!');
+      }
+    } else {
+      console.log('[Server] Geen callback_url, resultaat alleen gelogd');
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+  } catch (error) {
+    console.error(`[Server] Warranty error: ${error.message}`);
+
+    // Stuur error terug via callback
+    if (callback_url) {
+      try {
+        await fetch(callback_url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-callback-secret': callback_secret || process.env.CALLBACK_SECRET || ''
+          },
+          body: JSON.stringify({
+            lookup_id,
+            status: 'error',
+            error_message: error.message
+          })
+        });
+        console.log('[Server] Error callback verstuurd');
+      } catch (callbackError) {
+        console.error(`[Server] Kon error callback niet versturen: ${callbackError.message}`);
+      }
+    }
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚗 Servicebox Scraping Worker draait op http://localhost:${PORT}`);
-  console.log(`   POST /scrape  — Start een lookup (kenteken of VIN)`);
-  console.log(`   GET  /health  — Health check`);
+  console.log(`   POST /scrape             — Start een lookup (kenteken of VIN)`);
+  console.log(`   POST /activate-warranty   — Activeer 2+6 garantie`);
+  console.log(`   GET  /health             — Health check`);
   console.log(`   Max 1 gelijktijdige scrape (queue-systeem)\n`);
 });

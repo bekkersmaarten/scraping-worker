@@ -1194,4 +1194,434 @@ async function scrapeQuotelink(vin, kmStand) {
   }
 }
 
-module.exports = { scrapeServicebox, scrapeQuotelink };
+// =========================================
+// 2+6 GARANTIE ACTIVATIE
+// =========================================
+/**
+ * Activeert de 2+6 jaar speciale garantie voor een voertuig.
+ *
+ * Flow:
+ * 1. Login op Servicebox
+ * 2. Zoek voertuig op VIN
+ * 3. Detecteer het groene "8" pictogram (= voertuig komt in aanmerking)
+ * 4. Klik op het pictogram → extern formulier opent (allucare-dmbr.stellantis.com)
+ * 5. Handle SSO auth (idfed.mpsa.com)
+ * 6. Vul formulier in: kilometerstand + e-mailadres klant
+ * 7. Vink beide bevestigingscheckboxes aan
+ * 8. Klik "Indienen"
+ *
+ * Returns: { status, vin, message, vehicle, contract_info }
+ */
+async function activateWarranty(vin, kmStand, customerEmail) {
+  const headless = process.env.HEADLESS !== 'false';
+  const slowMo = parseInt(process.env.SLOW_MO || '250');
+
+  console.log(`[Warranty] Start 2+6 activatie: ${vin}, km: ${kmStand}, email: ${customerEmail ? '***' : 'GEEN'}`);
+
+  if (!customerEmail) {
+    return { status: 'skipped', vin, message: 'Geen e-mailadres opgegeven (verplicht veld)' };
+  }
+
+  const browser = await chromium.launch({ headless, slowMo });
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    httpCredentials: {
+      username: USERNAME,
+      password: PASSWORD
+    }
+  });
+
+  // Luister naar nieuwe pagina's (het 2+6 formulier opent in nieuw venster)
+  let warrantyPage = null;
+  context.on('page', (newPage) => {
+    console.log(`[Warranty] Nieuw venster geopend: ${newPage.url()}`);
+    warrantyPage = newPage;
+  });
+
+  const page = await context.newPage();
+
+  try {
+    // STAP 1: Login
+    await login(page);
+
+    // STAP 2: Zoek voertuig op VIN
+    const vehicleData = await searchAndExtractVehicle(page, vin);
+    console.log(`[Warranty] Voertuig gevonden: ${JSON.stringify(vehicleData)}`);
+
+    // STAP 3: Detecteer het groene "8" pictogram
+    // Het icoon zit in de frameset header (frameBvv), zoek in alle frames
+    let iconFound = false;
+    let iconStatus = 'not_found'; // not_found, grey, green
+
+    for (const frame of page.frames()) {
+      try {
+        const iconInfo = await frame.evaluate(() => {
+          // Zoek afbeeldingen/links die verwijzen naar het 8-jaar garantie icoon
+          const allElements = document.querySelectorAll('img, a, span, div');
+          for (const el of allElements) {
+            const src = (el.getAttribute('src') || '').toLowerCase();
+            const alt = (el.getAttribute('alt') || '').toLowerCase();
+            const title = (el.getAttribute('title') || '').toLowerCase();
+            const href = (el.getAttribute('href') || '');
+            const onclick = (el.getAttribute('onclick') || '');
+            const className = (el.className || '').toLowerCase();
+
+            // Zoek naar het 8-jaar/warranty icoon
+            if (src.includes('8year') || src.includes('warranty') || src.includes('garantie') ||
+                src.includes('stellacare') || src.includes('allucare') ||
+                alt.includes('8 year') || alt.includes('warranty') || alt.includes('garantie') ||
+                title.includes('8 year') || title.includes('warranty') || title.includes('garantie') ||
+                href.includes('allucare') || href.includes('stellacare') ||
+                onclick.includes('allucare') || onclick.includes('stellacare')) {
+
+              // Bepaal kleur/status
+              const isGreen = src.includes('green') || className.includes('green') ||
+                              src.includes('active') || className.includes('active') ||
+                              !src.includes('grey') && !src.includes('gray') && !className.includes('disabled');
+
+              return {
+                found: true,
+                status: isGreen ? 'green' : 'grey',
+                tag: el.tagName,
+                src: src.substring(0, 200),
+                href: href.substring(0, 200),
+                onclick: onclick.substring(0, 200)
+              };
+            }
+          }
+
+          // Fallback: zoek een klikbaar "8" element
+          const links = document.querySelectorAll('a');
+          for (const link of links) {
+            const text = (link.textContent || '').trim();
+            const href = link.getAttribute('href') || '';
+            const onclick = link.getAttribute('onclick') || '';
+            if (text === '8' || href.includes('allucare') || onclick.includes('allucare') ||
+                href.includes('stellacare') || onclick.includes('stellacare')) {
+              return {
+                found: true,
+                status: 'green',
+                tag: 'A',
+                text: text,
+                href: href.substring(0, 200),
+                onclick: onclick.substring(0, 200)
+              };
+            }
+          }
+
+          return { found: false };
+        });
+
+        if (iconInfo.found) {
+          iconFound = true;
+          iconStatus = iconInfo.status;
+          console.log(`[Warranty] 8-icoon gevonden: status=${iconInfo.status}, tag=${iconInfo.tag}`);
+
+          if (iconStatus === 'grey') {
+            await browser.close();
+            return { status: 'not_eligible', vin, message: 'Voertuig komt in aanmerking maar kan niet geactiveerd worden (grijs icoon - ander land?)', vehicle: vehicleData };
+          }
+
+          // Klik op het icoon om het formulier te openen
+          if (iconInfo.href && iconInfo.href !== '#' && !iconInfo.href.startsWith('javascript:')) {
+            console.log(`[Warranty] Navigeren naar: ${iconInfo.href}`);
+            warrantyPage = await context.newPage();
+            await warrantyPage.goto(iconInfo.href, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+          } else if (iconInfo.onclick) {
+            console.log(`[Warranty] Klikken op icoon via onclick...`);
+            // Zoek en klik het element
+            const els = await frame.$$(`${iconInfo.tag}`);
+            for (const el of els) {
+              const elOnclick = await el.getAttribute('onclick') || '';
+              if (elOnclick.includes('allucare') || elOnclick.includes('stellacare')) {
+                await el.click();
+                break;
+              }
+            }
+          } else {
+            // Klik direct op gevonden element
+            const els = await frame.$$(`img[src*="8year"], img[src*="warranty"], img[src*="garantie"], img[src*="stellacare"], img[src*="allucare"], a[href*="allucare"], a[href*="stellacare"]`);
+            if (els.length > 0) {
+              await els[0].click();
+            }
+          }
+          break;
+        }
+      } catch (e) { continue; }
+    }
+
+    // Fallback: zoek het icoon via de top-bar van Servicebox
+    if (!iconFound) {
+      console.log('[Warranty] Icoon niet gevonden via frames, zoek in alle pagina-elementen...');
+
+      // Probeer het icoon te vinden via een bredere zoekopdracht
+      try {
+        const allFrames = page.frames();
+        for (const frame of allFrames) {
+          const pageHTML = await frame.evaluate(() => document.body?.innerHTML?.substring(0, 5000) || '');
+          if (pageHTML.includes('allucare') || pageHTML.includes('stellacare') || pageHTML.includes('8year')) {
+            console.log(`[Warranty] Relevante content gevonden in frame: ${frame.url()}`);
+            // Klik op het element
+            const clicked = await frame.evaluate(() => {
+              const els = document.querySelectorAll('a, img, span, div');
+              for (const el of els) {
+                const attrs = (el.outerHTML || '').toLowerCase();
+                if (attrs.includes('allucare') || attrs.includes('stellacare') || attrs.includes('8year')) {
+                  el.click();
+                  return true;
+                }
+              }
+              return false;
+            });
+            if (clicked) {
+              iconFound = true;
+              iconStatus = 'green';
+              console.log('[Warranty] Icoon aangeklikt via fallback');
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`[Warranty] Fallback zoeken mislukt: ${e.message.substring(0, 100)}`);
+      }
+    }
+
+    if (!iconFound) {
+      await browser.close();
+      return { status: 'not_eligible', vin, message: 'Geen 2+6 garantie-icoon gevonden (voertuig komt niet in aanmerking)', vehicle: vehicleData };
+    }
+
+    // STAP 4: Wacht op het warranty formulier (nieuw venster of navigatie)
+    console.log('[Warranty] Wachten op formulier...');
+    await page.waitForTimeout(5000);
+
+    // Als er geen nieuw venster is geopend, check of de pagina een melding toont
+    if (!warrantyPage) {
+      // Check of er een nieuw venster verschenen is
+      const allPages = context.pages();
+      for (const p of allPages) {
+        const url = p.url();
+        if (url.includes('allucare') || url.includes('stellacare') || url.includes('idfed')) {
+          warrantyPage = p;
+          break;
+        }
+      }
+    }
+
+    // Als er een "klik hier" link verscheen (zoals in het screenshot)
+    if (!warrantyPage) {
+      for (const frame of page.frames()) {
+        try {
+          const kliklinkClicked = await frame.evaluate(() => {
+            const links = document.querySelectorAll('a');
+            for (const link of links) {
+              const text = (link.textContent || '').toLowerCase();
+              if (text.includes('klik hier') && link.href) {
+                window.open(link.href, '_blank');
+                return link.href;
+              }
+            }
+            return null;
+          });
+          if (kliklinkClicked) {
+            console.log(`[Warranty] "Klik hier" link gevonden: ${kliklinkClicked.substring(0, 100)}`);
+            await page.waitForTimeout(3000);
+            const allPages = context.pages();
+            warrantyPage = allPages[allPages.length - 1];
+            break;
+          }
+        } catch (e) { continue; }
+      }
+    }
+
+    if (!warrantyPage || warrantyPage.url() === 'about:blank') {
+      await browser.close();
+      return { status: 'error', vin, message: 'Formulier kon niet geopend worden na klik op 8-icoon', vehicle: vehicleData };
+    }
+
+    console.log(`[Warranty] Formulier pagina: ${warrantyPage.url()}`);
+
+    // STAP 5: Handle SSO login als nodig (idfed.mpsa.com)
+    await warrantyPage.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    await warrantyPage.waitForTimeout(2000);
+
+    if (warrantyPage.url().includes('idfed.mpsa.com')) {
+      console.log('[Warranty] SSO login vereist...');
+      try {
+        const ssoUsername = await warrantyPage.$('input[type="text"], input[name*="user" i], input[name="username"]');
+        if (ssoUsername) {
+          await ssoUsername.fill(USERNAME);
+          const nextBtn = await warrantyPage.$('button:has-text("Next"), input[type="submit"], button[type="submit"]');
+          if (nextBtn) await nextBtn.click();
+          await warrantyPage.waitForTimeout(3000);
+
+          const ssoPassword = await warrantyPage.$('input[type="password"]');
+          if (ssoPassword) {
+            await ssoPassword.fill(PASSWORD);
+            const loginBtn = await warrantyPage.$('button:has-text("Sign"), button:has-text("Login"), input[type="submit"], button[type="submit"]');
+            if (loginBtn) await loginBtn.click();
+          }
+          await warrantyPage.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+          await warrantyPage.waitForTimeout(3000);
+          console.log(`[Warranty] SSO login voltooid, URL: ${warrantyPage.url()}`);
+        }
+      } catch (e) {
+        throw new Error(`SSO login mislukt: ${e.message.substring(0, 100)}`);
+      }
+    }
+
+    // STAP 6: Vul het formulier in
+    console.log('[Warranty] Formulier invullen...');
+    await warrantyPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    await warrantyPage.waitForTimeout(2000);
+
+    // Check of we op het juiste formulier zijn
+    const pageContent = await warrantyPage.evaluate(() => document.body?.innerText || '');
+    if (!pageContent.includes('Warranty') && !pageContent.includes('warranty') &&
+        !pageContent.includes('Garantie') && !pageContent.includes('garantie') &&
+        !pageContent.includes('Kilometerstand') && !pageContent.includes('kilometerstand')) {
+      console.log(`[Warranty] Onverwachte pagina. Content: ${pageContent.substring(0, 300)}`);
+      await browser.close();
+      return { status: 'error', vin, message: 'Onverwachte pagina na SSO login', vehicle: vehicleData };
+    }
+
+    // Check indieningsgeschiedenis - misschien al geactiveerd
+    if (pageContent.includes('contract is aangemaakt') || pageContent.includes('already submitted') || pageContent.includes('reeds ingediend')) {
+      await browser.close();
+      return { status: 'already_activated', vin, message: '2+6 garantie is al eerder geactiveerd voor dit voertuig', vehicle: vehicleData };
+    }
+
+    // Vul kilometerstand in
+    const kmField = await warrantyPage.$('input[type="text"], input[type="number"]');
+    const allInputs = await warrantyPage.$$('input[type="text"], input[type="number"]');
+    console.log(`[Warranty] ${allInputs.length} tekstvelden gevonden`);
+
+    let kmFilled = false;
+    for (const input of allInputs) {
+      // Zoek het kilometerstand-veld (staat bij "Kilometer" label)
+      const parentText = await input.evaluate(el => {
+        const parent = el.closest('div, tr, td, label, fieldset');
+        return parent ? parent.textContent.substring(0, 200) : '';
+      });
+      if (parentText.toLowerCase().includes('kilometer') || parentText.toLowerCase().includes('km')) {
+        await input.fill(String(kmStand));
+        kmFilled = true;
+        console.log(`[Warranty] Kilometerstand ingevuld: ${kmStand}`);
+        break;
+      }
+    }
+
+    if (!kmFilled && allInputs.length > 0) {
+      // Fallback: vul het eerste lege tekstveld
+      for (const input of allInputs) {
+        const val = await input.inputValue();
+        if (!val || val.trim() === '') {
+          await input.fill(String(kmStand));
+          kmFilled = true;
+          console.log('[Warranty] Kilometerstand ingevuld in eerste lege veld');
+          break;
+        }
+      }
+    }
+
+    // Vul e-mailadres in
+    let emailFilled = false;
+    const emailInputs = await warrantyPage.$$('input[type="email"], input[type="text"]');
+    for (const input of emailInputs) {
+      const parentText = await input.evaluate(el => {
+        const parent = el.closest('div, tr, td, label, fieldset');
+        return parent ? parent.textContent.substring(0, 200) : '';
+      });
+      if (parentText.toLowerCase().includes('mail') || parentText.toLowerCase().includes('e-mail') || parentText.toLowerCase().includes('email')) {
+        await input.fill(customerEmail);
+        emailFilled = true;
+        console.log('[Warranty] E-mailadres ingevuld: ***');
+        break;
+      }
+    }
+
+    if (!emailFilled) {
+      // Fallback: zoek naar onbekend leeg tekstveld na km
+      for (const input of emailInputs) {
+        const val = await input.inputValue();
+        const type = await input.getAttribute('type');
+        if ((!val || val.trim() === '') && type !== 'hidden') {
+          await input.fill(customerEmail);
+          emailFilled = true;
+          console.log('[Warranty] E-mailadres ingevuld in leeg veld (fallback)');
+          break;
+        }
+      }
+    }
+
+    if (!kmFilled || !emailFilled) {
+      console.log(`[Warranty] Formulier incompleet: km=${kmFilled}, email=${emailFilled}`);
+      await warrantyPage.screenshot({ path: `warranty-form-debug-${Date.now()}.png` });
+      await browser.close();
+      return { status: 'error', vin, message: `Kon formulier niet volledig invullen (km: ${kmFilled}, email: ${emailFilled})`, vehicle: vehicleData };
+    }
+
+    // STAP 7: Checkboxes aanvinken
+    const checkboxes = await warrantyPage.$$('input[type="checkbox"]');
+    console.log(`[Warranty] ${checkboxes.length} checkboxes gevonden`);
+    for (const cb of checkboxes) {
+      const isChecked = await cb.isChecked();
+      if (!isChecked) {
+        await cb.check();
+        console.log('[Warranty] Checkbox aangevinkt');
+      }
+    }
+
+    // STAP 8: Klik "Indienen"
+    console.log('[Warranty] Klikken op Indienen...');
+    const submitBtn = await warrantyPage.$('button:has-text("Indienen"), input[value*="Indienen"], button:has-text("Submit"), input[type="submit"]');
+    if (!submitBtn) {
+      await warrantyPage.screenshot({ path: `warranty-submit-debug-${Date.now()}.png` });
+      await browser.close();
+      return { status: 'error', vin, message: 'Indienen-knop niet gevonden', vehicle: vehicleData };
+    }
+
+    await submitBtn.click();
+    await warrantyPage.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    await warrantyPage.waitForTimeout(3000);
+
+    // Check resultaat
+    const resultText = await warrantyPage.evaluate(() => document.body?.innerText || '');
+    console.log(`[Warranty] Resultaat pagina: ${resultText.substring(0, 300)}`);
+
+    if (resultText.includes('contract') || resultText.includes('bevestig') || resultText.includes('success') || resultText.includes('ingediend')) {
+      console.log(`[Warranty] 2+6 activatie GELUKT voor ${vin}`);
+      await browser.close();
+      return {
+        status: 'activated',
+        vin,
+        message: '2+6 garantie succesvol geactiveerd',
+        vehicle: vehicleData,
+        km_stand: kmStand,
+        result_text: resultText.substring(0, 500)
+      };
+    } else {
+      console.log(`[Warranty] Onverwacht resultaat na indienen`);
+      await warrantyPage.screenshot({ path: `warranty-result-debug-${Date.now()}.png` });
+      await browser.close();
+      return {
+        status: 'unknown',
+        vin,
+        message: 'Formulier ingediend maar bevestiging niet herkend',
+        vehicle: vehicleData,
+        result_text: resultText.substring(0, 500)
+      };
+    }
+
+  } catch (error) {
+    console.error(`[Warranty] Error: ${error.message}`);
+    try {
+      await page.screenshot({ path: `error-warranty-${Date.now()}.png` });
+    } catch (e) { /* ignore */ }
+    await browser.close();
+    throw error;
+  }
+}
+
+module.exports = { scrapeServicebox, scrapeQuotelink, activateWarranty };
