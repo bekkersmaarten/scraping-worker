@@ -1495,66 +1495,123 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       return { status: 'already_activated', vin, message: '2+6 garantie is al eerder geactiveerd voor dit voertuig', vehicle: vehicleData };
     }
 
-    // Vul kilometerstand in
-    const kmField = await warrantyPage.$('input[type="text"], input[type="number"]');
-    const allInputs = await warrantyPage.$$('input[type="text"], input[type="number"]');
-    console.log(`[Warranty] ${allInputs.length} tekstvelden gevonden`);
+    // Debug: dump alle formulier-elementen op de pagina
+    const formDebug = await warrantyPage.evaluate(() => {
+      const inputs = Array.from(document.querySelectorAll('input, textarea, select')).map(el => ({
+        tag: el.tagName,
+        type: el.type,
+        name: el.name,
+        id: el.id,
+        placeholder: el.placeholder,
+        value: el.value,
+        visible: el.offsetParent !== null,
+        outerHTML: el.outerHTML?.substring(0, 300)
+      }));
+      const labels = Array.from(document.querySelectorAll('label')).map(el => ({
+        text: el.textContent?.trim()?.substring(0, 100),
+        for: el.getAttribute('for'),
+        outerHTML: el.outerHTML?.substring(0, 300)
+      }));
+      const iframes = Array.from(document.querySelectorAll('iframe')).map(el => ({
+        src: el.src,
+        id: el.id,
+        name: el.name
+      }));
+      return { inputs, labels, iframes, bodyHTML: document.body?.innerHTML?.substring(0, 2000) };
+    });
+
+    console.log(`[Warranty] Formulier debug: ${formDebug.inputs.length} inputs, ${formDebug.labels.length} labels, ${formDebug.iframes.length} iframes`);
+    formDebug.inputs.forEach(inp => console.log(`[Warranty]   INPUT: type=${inp.type}, name=${inp.name}, id=${inp.id}, placeholder=${inp.placeholder}, visible=${inp.visible}`));
+    formDebug.labels.forEach(lbl => console.log(`[Warranty]   LABEL: "${lbl.text}" for=${lbl.for}`));
+    formDebug.iframes.forEach(ifr => console.log(`[Warranty]   IFRAME: src=${ifr.src}, id=${ifr.id}, name=${ifr.name}`));
+    if (formDebug.inputs.length === 0) {
+      console.log(`[Warranty] Geen inputs gevonden! Body HTML: ${formDebug.bodyHTML}`);
+    }
+
+    // Check of het formulier in een iframe zit
+    let formPage = warrantyPage;
+    if (formDebug.iframes.length > 0 && formDebug.inputs.length === 0) {
+      console.log('[Warranty] Formulier zit mogelijk in een iframe, zoek daar...');
+      for (const frame of warrantyPage.frames()) {
+        const frameInputs = await frame.$$('input, textarea, select');
+        if (frameInputs.length > 0) {
+          console.log(`[Warranty] ${frameInputs.length} inputs gevonden in iframe: ${frame.url()}`);
+          formPage = frame;
+          break;
+        }
+      }
+    }
+
+    // Vul kilometerstand in — zoek breed naar input velden
+    const allInputs = await formPage.$$('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])');
+    console.log(`[Warranty] ${allInputs.length} invulbare velden gevonden`);
 
     let kmFilled = false;
+    let emailFilled = false;
+
+    // Strategie 1: zoek op label/parent tekst
     for (const input of allInputs) {
-      // Zoek het kilometerstand-veld (staat bij "Kilometer" label)
-      const parentText = await input.evaluate(el => {
-        const parent = el.closest('div, tr, td, label, fieldset');
-        return parent ? parent.textContent.substring(0, 200) : '';
+      const fieldInfo = await input.evaluate(el => {
+        // Zoek label via for-attribuut
+        const id = el.id;
+        const label = id ? document.querySelector(`label[for="${id}"]`) : null;
+        const labelText = label ? label.textContent?.trim() : '';
+
+        // Zoek label via parent elementen
+        const parent = el.closest('div, tr, td, fieldset, .form-group, .field');
+        const parentText = parent ? parent.textContent?.trim()?.substring(0, 300) : '';
+
+        // Placeholder
+        const placeholder = el.placeholder || '';
+
+        return {
+          id: el.id,
+          name: el.name,
+          type: el.type,
+          value: el.value,
+          placeholder,
+          labelText,
+          parentText: parentText.substring(0, 200),
+          ariaLabel: el.getAttribute('aria-label') || ''
+        };
       });
-      if (parentText.toLowerCase().includes('kilometer') || parentText.toLowerCase().includes('km')) {
+
+      const searchText = (fieldInfo.labelText + ' ' + fieldInfo.parentText + ' ' + fieldInfo.placeholder + ' ' + fieldInfo.ariaLabel + ' ' + fieldInfo.name + ' ' + fieldInfo.id).toLowerCase();
+      console.log(`[Warranty]   Veld: id=${fieldInfo.id}, name=${fieldInfo.name}, type=${fieldInfo.type}, label="${fieldInfo.labelText}", placeholder="${fieldInfo.placeholder}"`);
+
+      if (!kmFilled && (searchText.includes('kilometer') || searchText.includes('km') || searchText.includes('mileage') || searchText.includes('odometer'))) {
         await input.fill(String(kmStand));
         kmFilled = true;
-        console.log(`[Warranty] Kilometerstand ingevuld: ${kmStand}`);
-        break;
-      }
-    }
-
-    if (!kmFilled && allInputs.length > 0) {
-      // Fallback: vul het eerste lege tekstveld
-      for (const input of allInputs) {
-        const val = await input.inputValue();
-        if (!val || val.trim() === '') {
-          await input.fill(String(kmStand));
-          kmFilled = true;
-          console.log('[Warranty] Kilometerstand ingevuld in eerste lege veld');
-          break;
-        }
-      }
-    }
-
-    // Vul e-mailadres in
-    let emailFilled = false;
-    const emailInputs = await warrantyPage.$$('input[type="email"], input[type="text"]');
-    for (const input of emailInputs) {
-      const parentText = await input.evaluate(el => {
-        const parent = el.closest('div, tr, td, label, fieldset');
-        return parent ? parent.textContent.substring(0, 200) : '';
-      });
-      if (parentText.toLowerCase().includes('mail') || parentText.toLowerCase().includes('e-mail') || parentText.toLowerCase().includes('email')) {
+        console.log(`[Warranty] Kilometerstand ingevuld: ${kmStand} (veld: ${fieldInfo.id || fieldInfo.name})`);
+      } else if (!emailFilled && (searchText.includes('mail') || searchText.includes('e-mail') || searchText.includes('email') || searchText.includes('courriel'))) {
         await input.fill(customerEmail);
         emailFilled = true;
-        console.log('[Warranty] E-mailadres ingevuld: ***');
-        break;
+        console.log(`[Warranty] E-mailadres ingevuld (veld: ${fieldInfo.id || fieldInfo.name})`);
       }
     }
 
-    if (!emailFilled) {
-      // Fallback: zoek naar onbekend leeg tekstveld na km
-      for (const input of emailInputs) {
-        const val = await input.inputValue();
-        const type = await input.getAttribute('type');
-        if ((!val || val.trim() === '') && type !== 'hidden') {
-          await input.fill(customerEmail);
-          emailFilled = true;
-          console.log('[Warranty] E-mailadres ingevuld in leeg veld (fallback)');
-          break;
+    // Strategie 2: als niet gevonden via labels, vul lege velden in volgorde
+    if (!kmFilled || !emailFilled) {
+      console.log('[Warranty] Velden niet gevonden via labels, probeer op volgorde...');
+      const emptyInputs = [];
+      for (const input of allInputs) {
+        const val = await input.inputValue().catch(() => '');
+        const isVisible = await input.isVisible().catch(() => false);
+        if ((!val || val.trim() === '') && isVisible) {
+          emptyInputs.push(input);
         }
+      }
+      console.log(`[Warranty] ${emptyInputs.length} lege zichtbare velden gevonden`);
+
+      if (!kmFilled && emptyInputs.length >= 1) {
+        await emptyInputs[0].fill(String(kmStand));
+        kmFilled = true;
+        console.log('[Warranty] Kilometerstand ingevuld in eerste lege veld');
+      }
+      if (!emailFilled && emptyInputs.length >= 2) {
+        await emptyInputs[1].fill(customerEmail);
+        emailFilled = true;
+        console.log('[Warranty] E-mailadres ingevuld in tweede lege veld');
       }
     }
 
