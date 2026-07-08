@@ -1458,88 +1458,93 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       console.log(`[Warranty] SSO pagina: ${ssoFields.length} input velden`);
       ssoFields.forEach(f => console.log(`[Warranty]   SSO INPUT: type=${f.type}, name=${f.name}, id=${f.id}, visible=${f.visible}`));
 
-      // Zoek username veld (kan type="text", type="email", of geen type hebben)
-      const usernameField = await warrantyPage.$('input[type="text"]:not([type="hidden"]), input[type="email"], input[name*="user" i], input[name*="login" i], input[id*="user" i], input[id*="login" i], input[name="username"]');
+      // Check of er een password veld is (PingFederate pagina 2: username + password samen)
+      const passwordField = await warrantyPage.$('input[type="password"]');
+      const passwordVisible = passwordField ? await passwordField.isVisible().catch(() => false) : false;
+
+      if (passwordVisible) {
+        // PAGINA 2: Username staat er al in, vul alleen password in
+        console.log('[Warranty] Password veld gevonden (PingFederate stap 2)');
+
+        // Check of username al gevuld is, zo niet vul het in
+        const usernameOnSamePage = await warrantyPage.$('#username, input[name="pf.username"]');
+        if (usernameOnSamePage) {
+          const currentVal = await usernameOnSamePage.inputValue().catch(() => '');
+          if (!currentVal || currentVal.trim() === '') {
+            console.log('[Warranty] Username veld leeg op password pagina, invullen...');
+            await usernameOnSamePage.evaluate((el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }, USERNAME);
+          } else {
+            console.log(`[Warranty] Username al gevuld: ${currentVal.substring(0, 5)}...`);
+          }
+        }
+
+        // Vul password in
+        try {
+          await passwordField.click();
+          await warrantyPage.waitForTimeout(500);
+          await warrantyPage.keyboard.type(PASSWORD, { delay: 50 });
+          console.log('[Warranty] Password ingevuld via keyboard');
+        } catch (e) {
+          console.log(`[Warranty] Password keyboard mislukt, probeer JS: ${e.message.substring(0, 80)}`);
+          await passwordField.evaluate((el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }, PASSWORD);
+          console.log('[Warranty] Password ingevuld via JS evaluate');
+        }
+
+        // Zoek submit knop — PingFederate gebruikt vaak een <a> met class "ping-button"
+        await warrantyPage.waitForTimeout(500);
+        const submitBtn = await warrantyPage.$('a.ping-button, button[type="submit"], input[type="submit"], button:has-text("Sign"), button:has-text("Log"), button:has-text("Inloggen")');
+        if (submitBtn) {
+          await submitBtn.click();
+          console.log('[Warranty] Login submit geklikt');
+        } else {
+          await warrantyPage.keyboard.press('Enter');
+          console.log('[Warranty] Enter ingedrukt na password');
+        }
+
+        // Wacht op redirect naar allucare
+        console.log('[Warranty] Wachten op redirect na login...');
+        try {
+          await warrantyPage.waitForURL(/allucare|stellantis|stellacare/i, { timeout: 30000 });
+          console.log(`[Warranty] Redirect geslaagd: ${warrantyPage.url()}`);
+        } catch (e) {
+          console.log(`[Warranty] Redirect timeout, huidige URL: ${warrantyPage.url()}`);
+          await warrantyPage.waitForTimeout(5000);
+        }
+        break;
+      }
+
+      // PAGINA 1: Alleen username veld (identifier stap)
+      const usernameField = await warrantyPage.$('#identifierInput, input[name="subject"], input[type="text"]:not([type="hidden"])');
       if (usernameField) {
         const isVisible = await usernameField.isVisible().catch(() => false);
         if (isVisible) {
-          console.log('[Warranty] Username veld gevonden, invullen...');
+          console.log('[Warranty] Username/identifier veld gevonden (stap 1)');
           try {
-            // Klik eerst op het veld, wacht, en type dan (PingFederate velden accepteren soms geen fill)
             await usernameField.click();
             await warrantyPage.waitForTimeout(500);
-            // Selecteer eventuele bestaande tekst en overschrijf
             await usernameField.selectText().catch(() => {});
             await warrantyPage.keyboard.type(USERNAME, { delay: 50 });
+            console.log('[Warranty] Username ingevuld via keyboard');
           } catch (e) {
-            console.log(`[Warranty] Username invullen via keyboard mislukt: ${e.message.substring(0, 100)}`);
-            // Laatste poging: evaluatie via JavaScript
-            try {
-              await usernameField.evaluate((el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }, USERNAME);
-              console.log('[Warranty] Username ingevuld via JS evaluate');
-            } catch (e2) {
-              throw new Error('SSO login mislukt: kon gebruikersnaam niet invullen');
-            }
+            console.log(`[Warranty] Username keyboard mislukt, probeer JS: ${e.message.substring(0, 80)}`);
+            await usernameField.evaluate((el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }, USERNAME);
+            console.log('[Warranty] Username ingevuld via JS evaluate');
           }
 
-          // Zoek en klik submit/next knop
+          // Submit
           await warrantyPage.waitForTimeout(500);
-          const submitBtn = await warrantyPage.$('button[type="submit"], input[type="submit"], button:has-text("Next"), button:has-text("Volgende"), button:has-text("Sign"), button:has-text("Log"), a.ping-button, a[title*="Sign"], a[title*="Next"]');
+          const submitBtn = await warrantyPage.$('a.ping-button, button[type="submit"], input[type="submit"], button:has-text("Next"), button:has-text("Volgende")');
           if (submitBtn) {
             await submitBtn.click();
-            console.log('[Warranty] Username submit geklikt');
+            console.log('[Warranty] Identifier submit geklikt');
           } else {
             await warrantyPage.keyboard.press('Enter');
-            console.log('[Warranty] Enter ingedrukt na username');
+            console.log('[Warranty] Enter ingedrukt na identifier');
           }
 
           await warrantyPage.waitForTimeout(3000);
           await warrantyPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
           continue;
-        }
-      }
-
-      // Zoek password veld
-      const passwordField = await warrantyPage.$('input[type="password"]');
-      if (passwordField) {
-        const isVisible = await passwordField.isVisible().catch(() => false);
-        if (isVisible) {
-          console.log('[Warranty] Password veld gevonden, invullen...');
-          try {
-            await passwordField.click();
-            await warrantyPage.waitForTimeout(500);
-            await passwordField.selectText().catch(() => {});
-            await warrantyPage.keyboard.type(PASSWORD, { delay: 50 });
-          } catch (e) {
-            console.log(`[Warranty] Password invullen via keyboard mislukt: ${e.message.substring(0, 100)}`);
-            try {
-              await passwordField.evaluate((el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }, PASSWORD);
-              console.log('[Warranty] Password ingevuld via JS evaluate');
-            } catch (e2) {
-              throw new Error('SSO login mislukt: kon wachtwoord niet invullen');
-            }
-          }
-
-          await warrantyPage.waitForTimeout(500);
-          const submitBtn = await warrantyPage.$('button[type="submit"], input[type="submit"], button:has-text("Sign"), button:has-text("Log"), button:has-text("Inloggen"), a.ping-button, a[title*="Sign"]');
-          if (submitBtn) {
-            await submitBtn.click();
-            console.log('[Warranty] Password submit geklikt');
-          } else {
-            await warrantyPage.keyboard.press('Enter');
-            console.log('[Warranty] Enter ingedrukt na password');
-          }
-
-          // Wacht op redirect naar allucare
-          console.log('[Warranty] Wachten op redirect na login...');
-          try {
-            await warrantyPage.waitForURL(/allucare|stellantis|stellacare/i, { timeout: 30000 });
-            console.log(`[Warranty] Redirect geslaagd: ${warrantyPage.url()}`);
-          } catch (e) {
-            console.log(`[Warranty] Redirect timeout, huidige URL: ${warrantyPage.url()}`);
-            await warrantyPage.waitForTimeout(5000);
-          }
-          break;
         }
       }
 
