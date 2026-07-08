@@ -1460,12 +1460,33 @@ async function activateWarranty(vin, kmStand, customerEmail) {
 
     // Check of we op het juiste formulier zijn
     const pageContent = await warrantyPage.evaluate(() => document.body?.innerText || '');
-    if (!pageContent.includes('Warranty') && !pageContent.includes('warranty') &&
-        !pageContent.includes('Garantie') && !pageContent.includes('garantie') &&
-        !pageContent.includes('Kilometerstand') && !pageContent.includes('kilometerstand')) {
-      console.log(`[Warranty] Onverwachte pagina. Content: ${pageContent.substring(0, 300)}`);
+    const pageUrl = warrantyPage.url();
+    console.log(`[Warranty] Formulier URL: ${pageUrl}`);
+    console.log(`[Warranty] Formulier content (eerste 500 chars): ${pageContent.substring(0, 500)}`);
+
+    const contentLower = pageContent.toLowerCase();
+    const isCorrectPage = contentLower.includes('warranty') ||
+                          contentLower.includes('garantie') ||
+                          contentLower.includes('kilometerstand') ||
+                          contentLower.includes('kilometer') ||
+                          contentLower.includes('care') ||
+                          contentLower.includes('stellacare') ||
+                          contentLower.includes('peugeot care') ||
+                          contentLower.includes('opel care') ||
+                          contentLower.includes('citroën care') ||
+                          contentLower.includes('citroen care') ||
+                          contentLower.includes('ds care') ||
+                          contentLower.includes('allucare') ||
+                          contentLower.includes('indienen') ||
+                          contentLower.includes('e-mail') ||
+                          pageUrl.includes('allucare') ||
+                          pageUrl.includes('stellacare') ||
+                          pageUrl.includes('stellantis');
+
+    if (!isCorrectPage) {
+      console.log(`[Warranty] Onverwachte pagina. Volledige content: ${pageContent.substring(0, 1000)}`);
       await browser.close();
-      return { status: 'error', vin, message: 'Onverwachte pagina na SSO login', vehicle: vehicleData };
+      return { status: 'error', vin, message: `Onverwachte pagina na SSO login (URL: ${pageUrl.substring(0, 100)})`, vehicle: vehicleData };
     }
 
     // Check indieningsgeschiedenis - misschien al geactiveerd
