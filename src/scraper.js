@@ -1253,11 +1253,55 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     // Het icoon zit in de frameset header (frameBvv), zoek in alle frames
     let iconFound = false;
     let iconStatus = 'not_found'; // not_found, grey, green
+    let iconElement = null; // bewaar referentie naar het frame met het icoon
 
+    // Eerst: dump ALLE afbeeldingen en links in alle frames voor debugging
+    for (const frame of page.frames()) {
+      try {
+        const frameDebug = await frame.evaluate(() => {
+          const imgs = Array.from(document.querySelectorAll('img')).map(img => ({
+            src: img.src?.substring(0, 300),
+            alt: img.alt,
+            title: img.title,
+            width: img.width,
+            height: img.height,
+            outerHTML: img.outerHTML?.substring(0, 400)
+          }));
+          const links = Array.from(document.querySelectorAll('a')).map(a => ({
+            href: a.href?.substring(0, 300),
+            text: a.textContent?.trim()?.substring(0, 100),
+            onclick: a.getAttribute('onclick')?.substring(0, 300),
+            outerHTML: a.outerHTML?.substring(0, 400)
+          }));
+          return { imgs, links, url: window.location.href };
+        });
+
+        // Filter voor potentieel relevante items
+        const relevantImgs = frameDebug.imgs.filter(img => {
+          const combined = (img.src + img.alt + img.title + img.outerHTML).toLowerCase();
+          return combined.includes('8') || combined.includes('year') || combined.includes('warranty') ||
+                 combined.includes('garantie') || combined.includes('allucare') || combined.includes('stellacare') ||
+                 combined.includes('care') || combined.includes('green') || combined.includes('grey') ||
+                 combined.includes('gray') || combined.includes('icon') || combined.includes('picto');
+        });
+        const relevantLinks = frameDebug.links.filter(link => {
+          const combined = (link.href + link.text + (link.onclick || '') + link.outerHTML).toLowerCase();
+          return combined.includes('allucare') || combined.includes('stellacare') || combined.includes('warranty') ||
+                 combined.includes('8year') || combined.includes('care') || combined.includes('garantie');
+        });
+
+        if (relevantImgs.length > 0 || relevantLinks.length > 0) {
+          console.log(`[Warranty] Frame ${frameDebug.url}: ${relevantImgs.length} relevante afbeeldingen, ${relevantLinks.length} relevante links`);
+          relevantImgs.forEach(img => console.log(`[Warranty]   IMG: ${img.outerHTML}`));
+          relevantLinks.forEach(link => console.log(`[Warranty]   LINK: ${link.outerHTML}`));
+        }
+      } catch (e) { /* frame niet bereikbaar */ }
+    }
+
+    // Nu zoek het 8-icoon
     for (const frame of page.frames()) {
       try {
         const iconInfo = await frame.evaluate(() => {
-          // Zoek afbeeldingen/links die verwijzen naar het 8-jaar garantie icoon
           const allElements = document.querySelectorAll('img, a, span, div');
           for (const el of allElements) {
             const src = (el.getAttribute('src') || '').toLowerCase();
@@ -1266,46 +1310,62 @@ async function activateWarranty(vin, kmStand, customerEmail) {
             const href = (el.getAttribute('href') || '');
             const onclick = (el.getAttribute('onclick') || '');
             const className = (el.className || '').toLowerCase();
+            const outerHTML = (el.outerHTML || '').toLowerCase();
 
-            // Zoek naar het 8-jaar/warranty icoon
-            if (src.includes('8year') || src.includes('warranty') || src.includes('garantie') ||
-                src.includes('stellacare') || src.includes('allucare') ||
+            // Zoek naar het 8-jaar/warranty icoon — breed zoeken
+            const isWarrantyIcon = src.includes('8year') || src.includes('warranty') || src.includes('garantie') ||
+                src.includes('stellacare') || src.includes('allucare') || src.includes('8_year') ||
+                src.includes('8ans') || src.includes('picto_8') || src.includes('icon_8') ||
                 alt.includes('8 year') || alt.includes('warranty') || alt.includes('garantie') ||
+                alt.includes('8 ans') || alt.includes('8 jaar') ||
                 title.includes('8 year') || title.includes('warranty') || title.includes('garantie') ||
+                title.includes('8 ans') || title.includes('8 jaar') ||
                 href.includes('allucare') || href.includes('stellacare') ||
-                onclick.includes('allucare') || onclick.includes('stellacare')) {
+                onclick.includes('allucare') || onclick.includes('stellacare');
 
-              // Bepaal kleur/status
-              const isGreen = src.includes('green') || className.includes('green') ||
-                              src.includes('active') || className.includes('active') ||
-                              !src.includes('grey') && !src.includes('gray') && !className.includes('disabled');
+            if (isWarrantyIcon) {
+              // Bepaal kleur/status: zoek expliciet naar grey/gray/gris/disabled indicators
+              const isExplicitlyGrey = src.includes('grey') || src.includes('gray') || src.includes('gris') ||
+                                       className.includes('grey') || className.includes('gray') || className.includes('disabled') ||
+                                       className.includes('inactive') || outerHTML.includes('opacity') ||
+                                       src.includes('_off') || src.includes('_no') || src.includes('_disabled');
+              const isExplicitlyGreen = src.includes('green') || src.includes('vert') ||
+                                        className.includes('green') || className.includes('active') ||
+                                        src.includes('_on') || src.includes('_yes') || src.includes('_active');
+
+              let status = 'unknown';
+              if (isExplicitlyGrey) status = 'grey';
+              else if (isExplicitlyGreen) status = 'green';
+              else status = 'found_unknown_color'; // niet duidelijk groen of grijs
 
               return {
                 found: true,
-                status: isGreen ? 'green' : 'grey',
+                status,
                 tag: el.tagName,
-                src: src.substring(0, 200),
-                href: href.substring(0, 200),
-                onclick: onclick.substring(0, 200)
+                src: src.substring(0, 300),
+                href: href.substring(0, 300),
+                onclick: onclick.substring(0, 300),
+                outerHTML: el.outerHTML?.substring(0, 500)
               };
             }
           }
 
-          // Fallback: zoek een klikbaar "8" element
+          // Fallback: zoek links naar allucare/stellacare
           const links = document.querySelectorAll('a');
           for (const link of links) {
             const text = (link.textContent || '').trim();
             const href = link.getAttribute('href') || '';
             const onclick = link.getAttribute('onclick') || '';
-            if (text === '8' || href.includes('allucare') || onclick.includes('allucare') ||
+            if (href.includes('allucare') || onclick.includes('allucare') ||
                 href.includes('stellacare') || onclick.includes('stellacare')) {
               return {
                 found: true,
                 status: 'green',
                 tag: 'A',
                 text: text,
-                href: href.substring(0, 200),
-                onclick: onclick.substring(0, 200)
+                href: href.substring(0, 300),
+                onclick: onclick.substring(0, 300),
+                outerHTML: link.outerHTML?.substring(0, 500)
               };
             }
           }
@@ -1316,11 +1376,25 @@ async function activateWarranty(vin, kmStand, customerEmail) {
         if (iconInfo.found) {
           iconFound = true;
           iconStatus = iconInfo.status;
+          iconElement = frame;
           console.log(`[Warranty] 8-icoon gevonden: status=${iconInfo.status}, tag=${iconInfo.tag}`);
+          console.log(`[Warranty] Icon HTML: ${iconInfo.outerHTML}`);
+          console.log(`[Warranty] Icon src: ${iconInfo.src}`);
 
+          // GRIJS ICOON = ander land, specifieke status
           if (iconStatus === 'grey') {
             await browser.close();
-            return { status: 'not_eligible', vin, message: 'Voertuig komt in aanmerking maar kan niet geactiveerd worden (grijs icoon - ander land?)', vehicle: vehicleData };
+            return {
+              status: 'other_country',
+              vin,
+              message: 'Voertuig gekoppeld aan ander land (grijs icoon) — activatie niet mogelijk vanuit NL',
+              vehicle: vehicleData
+            };
+          }
+
+          // ONBEKENDE KLEUR — log maar probeer toch te klikken
+          if (iconStatus === 'found_unknown_color') {
+            console.log(`[Warranty] Icoon kleur onbekend, probeer toch te openen...`);
           }
 
           // Klik op het icoon om het formulier te openen
@@ -1330,7 +1404,6 @@ async function activateWarranty(vin, kmStand, customerEmail) {
             await warrantyPage.goto(iconInfo.href, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
           } else if (iconInfo.onclick) {
             console.log(`[Warranty] Klikken op icoon via onclick...`);
-            // Zoek en klik het element
             const els = await frame.$$(`${iconInfo.tag}`);
             for (const el of els) {
               const elOnclick = await el.getAttribute('onclick') || '';
@@ -1340,8 +1413,9 @@ async function activateWarranty(vin, kmStand, customerEmail) {
               }
             }
           } else {
-            // Klik direct op gevonden element
-            const els = await frame.$$(`img[src*="8year"], img[src*="warranty"], img[src*="garantie"], img[src*="stellacare"], img[src*="allucare"], a[href*="allucare"], a[href*="stellacare"]`);
+            // Klik direct op gevonden element via selector
+            const selectors = 'img[src*="8year"], img[src*="warranty"], img[src*="garantie"], img[src*="stellacare"], img[src*="allucare"], img[src*="8_year"], img[src*="8ans"], img[src*="picto_8"], a[href*="allucare"], a[href*="stellacare"]';
+            const els = await frame.$$(selectors);
             if (els.length > 0) {
               await els[0].click();
             }
@@ -1351,34 +1425,49 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       } catch (e) { continue; }
     }
 
-    // Fallback: zoek het icoon via de top-bar van Servicebox
+    // Fallback: zoek het icoon via bredere HTML scan
     if (!iconFound) {
-      console.log('[Warranty] Icoon niet gevonden via frames, zoek in alle pagina-elementen...');
+      console.log('[Warranty] Icoon niet gevonden via specifieke zoekopdracht, breed scannen...');
 
-      // Probeer het icoon te vinden via een bredere zoekopdracht
       try {
-        const allFrames = page.frames();
-        for (const frame of allFrames) {
-          const pageHTML = await frame.evaluate(() => document.body?.innerHTML?.substring(0, 5000) || '');
-          if (pageHTML.includes('allucare') || pageHTML.includes('stellacare') || pageHTML.includes('8year')) {
-            console.log(`[Warranty] Relevante content gevonden in frame: ${frame.url()}`);
-            // Klik op het element
+        for (const frame of page.frames()) {
+          const htmlScan = await frame.evaluate(() => {
+            const body = document.body?.innerHTML || '';
+            // Zoek naar ALLE img tags en dump ze voor debugging
+            const allImgs = Array.from(document.querySelectorAll('img')).map(img => img.outerHTML?.substring(0, 400));
+            return {
+              hasAllucare: body.includes('allucare'),
+              hasStellacare: body.includes('stellacare'),
+              has8year: body.toLowerCase().includes('8year') || body.toLowerCase().includes('8_year'),
+              imgCount: allImgs.length,
+              allImgs: allImgs.slice(0, 20) // max 20 voor logging
+            };
+          });
+
+          if (htmlScan.hasAllucare || htmlScan.hasStellacare || htmlScan.has8year) {
+            console.log(`[Warranty] Relevante content in frame: allucare=${htmlScan.hasAllucare}, stellacare=${htmlScan.hasStellacare}, 8year=${htmlScan.has8year}`);
             const clicked = await frame.evaluate(() => {
               const els = document.querySelectorAll('a, img, span, div');
               for (const el of els) {
                 const attrs = (el.outerHTML || '').toLowerCase();
-                if (attrs.includes('allucare') || attrs.includes('stellacare') || attrs.includes('8year')) {
+                if (attrs.includes('allucare') || attrs.includes('stellacare') || attrs.includes('8year') || attrs.includes('8_year')) {
                   el.click();
-                  return true;
+                  return el.outerHTML?.substring(0, 300);
                 }
               }
-              return false;
+              return null;
             });
             if (clicked) {
               iconFound = true;
               iconStatus = 'green';
-              console.log('[Warranty] Icoon aangeklikt via fallback');
+              console.log(`[Warranty] Icoon aangeklikt via fallback: ${clicked}`);
               break;
+            }
+          } else {
+            // Dump alle img tags voor debugging als we niks vinden
+            console.log(`[Warranty] Frame ${frame.url()}: ${htmlScan.imgCount} imgs gevonden`);
+            if (htmlScan.imgCount <= 20) {
+              htmlScan.allImgs.forEach(html => console.log(`[Warranty]   IMG: ${html}`));
             }
           }
         }
@@ -1389,7 +1478,7 @@ async function activateWarranty(vin, kmStand, customerEmail) {
 
     if (!iconFound) {
       await browser.close();
-      return { status: 'not_eligible', vin, message: 'Geen 2+6 garantie-icoon gevonden (voertuig komt niet in aanmerking)', vehicle: vehicleData };
+      return { status: 'no_icon', vin, message: 'Geen 2+6 garantie-icoon gevonden — voertuig komt mogelijk niet in aanmerking of icoon niet herkend', vehicle: vehicleData };
     }
 
     // STAP 4: Wacht op het warranty formulier (nieuw venster of navigatie)
