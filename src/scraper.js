@@ -1424,67 +1424,138 @@ async function activateWarranty(vin, kmStand, customerEmail) {
 
     console.log(`[Warranty] Formulier pagina: ${warrantyPage.url()}`);
 
-    // STAP 5: Handle SSO login als nodig (idfed.mpsa.com)
-    await warrantyPage.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    // STAP 5: Handle SSO login (idfed.mpsa.com)
+    // De pagina opent op idfed.mpsa.com met OAuth2 redirect naar allucare-dmbr.stellantis.com
+    // We moeten inloggen en wachten tot we doorgestuurd worden naar het formulier
+
+    // Wacht eerst tot de pagina geladen is
+    await warrantyPage.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
     await warrantyPage.waitForTimeout(2000);
 
-    if (warrantyPage.url().includes('idfed.mpsa.com')) {
-      console.log('[Warranty] SSO login vereist...');
-      try {
-        const ssoUsername = await warrantyPage.$('input[type="text"], input[name*="user" i], input[name="username"]');
-        if (ssoUsername) {
-          await ssoUsername.fill(USERNAME);
-          const nextBtn = await warrantyPage.$('button:has-text("Next"), input[type="submit"], button[type="submit"]');
-          if (nextBtn) await nextBtn.click();
-          await warrantyPage.waitForTimeout(3000);
+    console.log(`[Warranty] STAP 5 - Huidige URL: ${warrantyPage.url()}`);
 
-          const ssoPassword = await warrantyPage.$('input[type="password"]');
-          if (ssoPassword) {
-            await ssoPassword.fill(PASSWORD);
-            const loginBtn = await warrantyPage.$('button:has-text("Sign"), button:has-text("Login"), input[type="submit"], button[type="submit"]');
-            if (loginBtn) await loginBtn.click();
-          }
-          await warrantyPage.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-          await warrantyPage.waitForTimeout(3000);
-          console.log(`[Warranty] SSO login voltooid, URL: ${warrantyPage.url()}`);
-        }
-      } catch (e) {
-        throw new Error(`SSO login mislukt: ${e.message.substring(0, 100)}`);
+    // SSO login loop — probeer max 3 keer (username stap, password stap, redirect)
+    for (let ssoAttempt = 0; ssoAttempt < 3; ssoAttempt++) {
+      const currentUrl = warrantyPage.url();
+      console.log(`[Warranty] SSO check ${ssoAttempt + 1}/3, URL: ${currentUrl}`);
+
+      if (!currentUrl.includes('idfed.mpsa.com')) {
+        console.log('[Warranty] Niet meer op idfed, SSO login voltooid of niet nodig');
+        break;
       }
+
+      // Dump alle velden op de SSO pagina
+      const ssoFields = await warrantyPage.evaluate(() => {
+        return Array.from(document.querySelectorAll('input')).map(el => ({
+          type: el.type,
+          name: el.name,
+          id: el.id,
+          placeholder: el.placeholder,
+          visible: el.offsetParent !== null,
+          outerHTML: el.outerHTML?.substring(0, 200)
+        }));
+      });
+      console.log(`[Warranty] SSO pagina: ${ssoFields.length} input velden`);
+      ssoFields.forEach(f => console.log(`[Warranty]   SSO INPUT: type=${f.type}, name=${f.name}, id=${f.id}, visible=${f.visible}`));
+
+      // Zoek username veld (kan type="text", type="email", of geen type hebben)
+      const usernameField = await warrantyPage.$('input[type="text"]:not([type="hidden"]), input[type="email"], input[name*="user" i], input[name*="login" i], input[id*="user" i], input[id*="login" i], input[name="username"]');
+      if (usernameField) {
+        const isVisible = await usernameField.isVisible().catch(() => false);
+        if (isVisible) {
+          console.log('[Warranty] Username veld gevonden, invullen...');
+          try {
+            await usernameField.fill(USERNAME);
+          } catch (e) {
+            throw new Error('SSO login mislukt: kon gebruikersnaam niet invullen');
+          }
+
+          // Zoek en klik submit/next knop
+          const submitBtn = await warrantyPage.$('button[type="submit"], input[type="submit"], button:has-text("Next"), button:has-text("Volgende"), button:has-text("Sign"), button:has-text("Log"), a.ping-button');
+          if (submitBtn) {
+            await submitBtn.click();
+            console.log('[Warranty] Username submit geklikt');
+          } else {
+            // Probeer Enter toets
+            await usernameField.press('Enter');
+            console.log('[Warranty] Enter ingedrukt na username');
+          }
+
+          await warrantyPage.waitForTimeout(3000);
+          await warrantyPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+          continue; // Volgende iteratie checkt of er een password veld is
+        }
+      }
+
+      // Zoek password veld
+      const passwordField = await warrantyPage.$('input[type="password"]');
+      if (passwordField) {
+        const isVisible = await passwordField.isVisible().catch(() => false);
+        if (isVisible) {
+          console.log('[Warranty] Password veld gevonden, invullen...');
+          try {
+            await passwordField.fill(PASSWORD);
+          } catch (e) {
+            throw new Error('SSO login mislukt: kon wachtwoord niet invullen');
+          }
+
+          const submitBtn = await warrantyPage.$('button[type="submit"], input[type="submit"], button:has-text("Sign"), button:has-text("Log"), button:has-text("Inloggen"), a.ping-button');
+          if (submitBtn) {
+            await submitBtn.click();
+            console.log('[Warranty] Password submit geklikt');
+          } else {
+            await passwordField.press('Enter');
+            console.log('[Warranty] Enter ingedrukt na password');
+          }
+
+          // Wacht op redirect naar allucare
+          console.log('[Warranty] Wachten op redirect na login...');
+          try {
+            await warrantyPage.waitForURL(/allucare|stellantis|stellacare/i, { timeout: 30000 });
+            console.log(`[Warranty] Redirect geslaagd: ${warrantyPage.url()}`);
+          } catch (e) {
+            console.log(`[Warranty] Redirect timeout, huidige URL: ${warrantyPage.url()}`);
+            // Wacht nog even en check
+            await warrantyPage.waitForTimeout(5000);
+          }
+          break;
+        }
+      }
+
+      // Geen username of password veld gevonden, wacht even
+      console.log('[Warranty] Geen login velden gevonden, wacht...');
+      await warrantyPage.waitForTimeout(3000);
     }
 
-    // STAP 6: Vul het formulier in
-    console.log('[Warranty] Formulier invullen...');
-    await warrantyPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-    await warrantyPage.waitForTimeout(2000);
+    // STAP 6: Check of we nu op het formulier zijn
+    await warrantyPage.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+    await warrantyPage.waitForTimeout(3000);
 
-    // Check of we op het juiste formulier zijn
-    const pageContent = await warrantyPage.evaluate(() => document.body?.innerText || '');
     const pageUrl = warrantyPage.url();
-    console.log(`[Warranty] Formulier URL: ${pageUrl}`);
+    console.log(`[Warranty] STAP 6 - Formulier URL: ${pageUrl}`);
+
+    // Als we nog steeds op idfed zitten, is de login mislukt
+    if (pageUrl.includes('idfed.mpsa.com')) {
+      console.log('[Warranty] Nog steeds op SSO pagina na login pogingen');
+      const ssoContent = await warrantyPage.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
+      console.log(`[Warranty] SSO pagina content: ${ssoContent}`);
+      await browser.close();
+      return { status: 'error', vin, message: 'SSO login mislukt — kon niet doorverwijzen naar formulier', vehicle: vehicleData };
+    }
+
+    const pageContent = await warrantyPage.evaluate(() => document.body?.innerText || '');
     console.log(`[Warranty] Formulier content (eerste 500 chars): ${pageContent.substring(0, 500)}`);
 
+    // Check of we op het juiste formulier zijn
     const contentLower = pageContent.toLowerCase();
-    const isCorrectPage = contentLower.includes('warranty') ||
-                          contentLower.includes('garantie') ||
-                          contentLower.includes('kilometerstand') ||
-                          contentLower.includes('kilometer') ||
-                          contentLower.includes('care') ||
-                          contentLower.includes('stellacare') ||
-                          contentLower.includes('peugeot care') ||
-                          contentLower.includes('opel care') ||
-                          contentLower.includes('citroën care') ||
-                          contentLower.includes('citroen care') ||
-                          contentLower.includes('ds care') ||
-                          contentLower.includes('allucare') ||
-                          contentLower.includes('indienen') ||
+    const isCorrectPage = contentLower.includes('warranty') || contentLower.includes('garantie') ||
+                          contentLower.includes('kilometerstand') || contentLower.includes('kilometer') ||
+                          contentLower.includes('care') || contentLower.includes('indienen') ||
                           contentLower.includes('e-mail') ||
-                          pageUrl.includes('allucare') ||
-                          pageUrl.includes('stellacare') ||
-                          pageUrl.includes('stellantis');
+                          pageUrl.includes('allucare') || pageUrl.includes('stellacare');
 
     if (!isCorrectPage) {
-      console.log(`[Warranty] Onverwachte pagina. Volledige content: ${pageContent.substring(0, 1000)}`);
+      console.log(`[Warranty] Onverwachte pagina. Content: ${pageContent.substring(0, 1000)}`);
       await browser.close();
       return { status: 'error', vin, message: `Onverwachte pagina na SSO login (URL: ${pageUrl.substring(0, 100)})`, vehicle: vehicleData };
     }
