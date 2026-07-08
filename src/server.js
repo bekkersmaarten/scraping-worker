@@ -222,7 +222,7 @@ app.post('/activate-warranty', async (req, res) => {
         },
         body: JSON.stringify({
           lookup_id,
-          status: result.status === 'activated' ? 'completed' : (result.status || 'error'),
+          status: result.status || 'error',
           data: result
         })
       });
