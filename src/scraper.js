@@ -104,18 +104,26 @@ async function login(page) {
     await page.screenshot({ path: 'login-debug.png' });
     throw new Error('Login formulier niet gevonden');
   }
-  await usernameField.fill(USERNAME);
+  try {
+    await usernameField.fill(USERNAME);
+  } catch (e) {
+    throw new Error(`Login mislukt: kon gebruikersnaam niet invullen (veld disabled of niet zichtbaar)`);
+  }
 
   // Password
   const passwordField = await page.$('input[type="password"]');
-  if (passwordField) {
-    await passwordField.fill(PASSWORD);
-  } else {
-    // Multi-step: submit username, dan password
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(2000);
-    const pwField = await page.$('input[type="password"]');
-    if (pwField) await pwField.fill(PASSWORD);
+  try {
+    if (passwordField) {
+      await passwordField.fill(PASSWORD);
+    } else {
+      // Multi-step: submit username, dan password
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(2000);
+      const pwField = await page.$('input[type="password"]');
+      if (pwField) await pwField.fill(PASSWORD);
+    }
+  } catch (e) {
+    throw new Error(`Login mislukt: kon wachtwoord niet invullen (veld disabled of niet zichtbaar)`);
   }
 
   // Submit
