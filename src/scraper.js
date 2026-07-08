@@ -1719,14 +1719,54 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       return { status: 'error', vin, message: `Kon formulier niet volledig invullen (km: ${kmFilled}, email: ${emailFilled})`, vehicle: vehicleData };
     }
 
-    // STAP 7: Checkboxes aanvinken
-    const checkboxes = await warrantyPage.$$('input[type="checkbox"]');
-    console.log(`[Warranty] ${checkboxes.length} checkboxes gevonden`);
-    for (const cb of checkboxes) {
-      const isChecked = await cb.isChecked();
-      if (!isChecked) {
-        await cb.check();
-        console.log('[Warranty] Checkbox aangevinkt');
+    // STAP 7: Toggles/checkboxes aanvinken
+    // Het formulier gebruikt Angular Material mat-slide-toggle componenten
+    // Deze hebben een verborgen <input type="checkbox"> met een <div class="mat-slide-toggle-thumb"> overlay
+    // We moeten de parent mat-slide-toggle klikken, niet de input zelf
+
+    // Methode 1: klik op mat-slide-toggle elementen
+    const slideToggles = await warrantyPage.$$('mat-slide-toggle, .mat-slide-toggle');
+    console.log(`[Warranty] ${slideToggles.length} slide toggles gevonden`);
+
+    if (slideToggles.length > 0) {
+      for (const toggle of slideToggles) {
+        const isChecked = await toggle.evaluate(el => el.classList.contains('mat-checked'));
+        if (!isChecked) {
+          // Klik op het label of de toggle container
+          await toggle.evaluate(el => {
+            const label = el.querySelector('.mat-slide-toggle-label, label');
+            if (label) {
+              label.click();
+            } else {
+              el.click();
+            }
+          });
+          await warrantyPage.waitForTimeout(300);
+          console.log('[Warranty] Slide toggle aangezet');
+        } else {
+          console.log('[Warranty] Slide toggle stond al aan');
+        }
+      }
+    } else {
+      // Fallback: probeer gewone checkboxes
+      const checkboxes = await warrantyPage.$$('input[type="checkbox"]');
+      console.log(`[Warranty] ${checkboxes.length} gewone checkboxes gevonden`);
+      for (const cb of checkboxes) {
+        const isChecked = await cb.isChecked();
+        if (!isChecked) {
+          // Klik op parent label in plaats van de input zelf
+          const clicked = await cb.evaluate(el => {
+            const label = el.closest('label') || el.parentElement;
+            if (label && label !== el) {
+              label.click();
+              return 'label';
+            }
+            el.click();
+            return 'direct';
+          });
+          console.log(`[Warranty] Checkbox aangevinkt via ${clicked}`);
+          await warrantyPage.waitForTimeout(300);
+        }
       }
     }
 
