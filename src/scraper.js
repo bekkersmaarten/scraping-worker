@@ -1465,25 +1465,37 @@ async function activateWarranty(vin, kmStand, customerEmail) {
         if (isVisible) {
           console.log('[Warranty] Username veld gevonden, invullen...');
           try {
-            await usernameField.fill(USERNAME);
+            // Klik eerst op het veld, wacht, en type dan (PingFederate velden accepteren soms geen fill)
+            await usernameField.click();
+            await warrantyPage.waitForTimeout(500);
+            // Selecteer eventuele bestaande tekst en overschrijf
+            await usernameField.selectText().catch(() => {});
+            await warrantyPage.keyboard.type(USERNAME, { delay: 50 });
           } catch (e) {
-            throw new Error('SSO login mislukt: kon gebruikersnaam niet invullen');
+            console.log(`[Warranty] Username invullen via keyboard mislukt: ${e.message.substring(0, 100)}`);
+            // Laatste poging: evaluatie via JavaScript
+            try {
+              await usernameField.evaluate((el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }, USERNAME);
+              console.log('[Warranty] Username ingevuld via JS evaluate');
+            } catch (e2) {
+              throw new Error('SSO login mislukt: kon gebruikersnaam niet invullen');
+            }
           }
 
           // Zoek en klik submit/next knop
-          const submitBtn = await warrantyPage.$('button[type="submit"], input[type="submit"], button:has-text("Next"), button:has-text("Volgende"), button:has-text("Sign"), button:has-text("Log"), a.ping-button');
+          await warrantyPage.waitForTimeout(500);
+          const submitBtn = await warrantyPage.$('button[type="submit"], input[type="submit"], button:has-text("Next"), button:has-text("Volgende"), button:has-text("Sign"), button:has-text("Log"), a.ping-button, a[title*="Sign"], a[title*="Next"]');
           if (submitBtn) {
             await submitBtn.click();
             console.log('[Warranty] Username submit geklikt');
           } else {
-            // Probeer Enter toets
-            await usernameField.press('Enter');
+            await warrantyPage.keyboard.press('Enter');
             console.log('[Warranty] Enter ingedrukt na username');
           }
 
           await warrantyPage.waitForTimeout(3000);
           await warrantyPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
-          continue; // Volgende iteratie checkt of er een password veld is
+          continue;
         }
       }
 
@@ -1494,17 +1506,27 @@ async function activateWarranty(vin, kmStand, customerEmail) {
         if (isVisible) {
           console.log('[Warranty] Password veld gevonden, invullen...');
           try {
-            await passwordField.fill(PASSWORD);
+            await passwordField.click();
+            await warrantyPage.waitForTimeout(500);
+            await passwordField.selectText().catch(() => {});
+            await warrantyPage.keyboard.type(PASSWORD, { delay: 50 });
           } catch (e) {
-            throw new Error('SSO login mislukt: kon wachtwoord niet invullen');
+            console.log(`[Warranty] Password invullen via keyboard mislukt: ${e.message.substring(0, 100)}`);
+            try {
+              await passwordField.evaluate((el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }, PASSWORD);
+              console.log('[Warranty] Password ingevuld via JS evaluate');
+            } catch (e2) {
+              throw new Error('SSO login mislukt: kon wachtwoord niet invullen');
+            }
           }
 
-          const submitBtn = await warrantyPage.$('button[type="submit"], input[type="submit"], button:has-text("Sign"), button:has-text("Log"), button:has-text("Inloggen"), a.ping-button');
+          await warrantyPage.waitForTimeout(500);
+          const submitBtn = await warrantyPage.$('button[type="submit"], input[type="submit"], button:has-text("Sign"), button:has-text("Log"), button:has-text("Inloggen"), a.ping-button, a[title*="Sign"]');
           if (submitBtn) {
             await submitBtn.click();
             console.log('[Warranty] Password submit geklikt');
           } else {
-            await passwordField.press('Enter');
+            await warrantyPage.keyboard.press('Enter');
             console.log('[Warranty] Enter ingedrukt na password');
           }
 
@@ -1515,7 +1537,6 @@ async function activateWarranty(vin, kmStand, customerEmail) {
             console.log(`[Warranty] Redirect geslaagd: ${warrantyPage.url()}`);
           } catch (e) {
             console.log(`[Warranty] Redirect timeout, huidige URL: ${warrantyPage.url()}`);
-            // Wacht nog even en check
             await warrantyPage.waitForTimeout(5000);
           }
           break;
