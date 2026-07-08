@@ -52,10 +52,10 @@ async function scrapeServicebox(kenteken, kmStand) {
     const recalls = await extractRecalls(page);
 
     // STAP 4: Ga terug naar Auto tab, klik Menu pricing → extract onderhoud
-    const { intervals, interval_pricing, prices } = await extractMaintenance(page, context, kmStand);
+    const { intervals, interval_pricing, prices, service_frequency } = await extractMaintenance(page, context, kmStand);
 
     console.log('[Scraper] Scrape voltooid!');
-    return { vehicle: vehicleData, recalls, intervals, interval_pricing, prices };
+    return { vehicle: vehicleData, recalls, intervals, interval_pricing, prices, service_frequency };
 
   } catch (error) {
     console.error('[Scraper] Error:', error.message);
@@ -510,7 +510,7 @@ async function extractMaintenance(page, context, kmStand) {
       executed = true;
     } catch (e) {
       console.log(`[Maintenance] /mp/ direct openen mislukt: ${e.message.substring(0, 100)}`);
-      return { intervals: [], prices: [] };
+      return { intervals: [], prices: [], interval_pricing: [], service_frequency: null };
     }
   }
 
@@ -543,7 +543,7 @@ async function extractMaintenance(page, context, kmStand) {
 
   if (!menuPricingPage) {
     console.log('[Maintenance] Geen Menu pricing pagina gevonden in open vensters');
-    return { intervals: [], prices: [] };
+    return { intervals: [], prices: [], interval_pricing: [], service_frequency: null };
   }
 
   console.log(`[Maintenance] Menu pricing gevonden: ${menuPricingPage.url()}`);
@@ -580,6 +580,9 @@ async function extractMaintenance(page, context, kmStand) {
   });
   console.log('[Maintenance] Pagina tekst (eerste 1500 chars):', pageText.substring(0, 1500));
 
+  // Extract de "Gebruikelijke frequentie" (bijv. "Elk 25000 Km / 1 jaar")
+  const serviceFrequency = await extractServiceFrequency(menuPricingPage);
+
   // Extract intervallen
   const intervals = await extractIntervals(menuPricingPage);
 
@@ -592,7 +595,79 @@ async function extractMaintenance(page, context, kmStand) {
   // Sluit popup
   await menuPricingPage.close();
 
-  return { intervals, interval_pricing, prices };
+  return { intervals, interval_pricing, prices, service_frequency: serviceFrequency };
+}
+
+// =========================================
+// SERVICE FREQUENTIE (km + maanden)
+// =========================================
+/**
+ * Extraheert de "Gebruikelijke frequentie" uit de Quotelink pagina.
+ * Formaat op pagina: "Elk 25000 Km / 1 jaar" of "Elk 15000 Km / 1 jaar"
+ *
+ * De pagina toont twee kolommen:
+ *   - "Normale gebruiksomstandigheden" → bijv. Elk 25000 Km / 1 jaar
+ *   - "Zware gebruiksomstandigheden" → bijv. Elk 15000 Km / 1 jaar
+ *
+ * Returns: { km: 25000, months: 12, km_heavy: 15000, months_heavy: 12, raw: "..." }
+ */
+async function extractServiceFrequency(page) {
+  console.log('[Frequency] Extracting service frequentie...');
+
+  const framesToCheck = page.frames().length > 1 ? page.frames() : [page.mainFrame()];
+
+  for (const frame of framesToCheck) {
+    try {
+      const freq = await frame.evaluate(() => {
+        const bodyText = document.body?.innerText || '';
+
+        // Zoek het patroon "Elk XXXXX Km / Y jaar" of "Elk XXXXX km / Y jaar"
+        const matches = [...bodyText.matchAll(/Elk\s+(\d[\d.]*)\s*Km?\s*\/\s*(\d+)\s*(jaar|maand)/gi)];
+
+        if (matches.length === 0) {
+          // Fallback: zoek alleen km-frequentie patronen
+          const kmMatch = bodyText.match(/(\d{4,6})\s*Km?\s*\/\s*(\d+)\s*(jaar|maand)/i);
+          if (kmMatch) {
+            const km = parseInt(kmMatch[1].replace(/\./g, ''));
+            const period = parseInt(kmMatch[2]);
+            const months = kmMatch[3].toLowerCase() === 'jaar' ? period * 12 : period;
+            return { km, months, km_heavy: null, months_heavy: null, raw: kmMatch[0] };
+          }
+          return null;
+        }
+
+        // Eerste match = normaal, tweede match = zwaar (indien aanwezig)
+        const parseMatch = (m) => {
+          const km = parseInt(m[1].replace(/\./g, ''));
+          const period = parseInt(m[2]);
+          const months = m[3].toLowerCase() === 'jaar' ? period * 12 : period;
+          return { km, months };
+        };
+
+        const normal = parseMatch(matches[0]);
+        const heavy = matches.length > 1 ? parseMatch(matches[1]) : null;
+
+        return {
+          km: normal.km,
+          months: normal.months,
+          km_heavy: heavy ? heavy.km : null,
+          months_heavy: heavy ? heavy.months : null,
+          raw: matches.map(m => m[0]).join(' | ')
+        };
+      });
+
+      if (freq) {
+        console.log(`[Frequency] Normaal: ${freq.km} km / ${freq.months} maanden`);
+        if (freq.km_heavy) {
+          console.log(`[Frequency] Zwaar: ${freq.km_heavy} km / ${freq.months_heavy} maanden`);
+        }
+        return freq;
+      }
+    } catch (e) { continue; }
+  }
+
+  console.log('[Frequency] Geen frequentie gevonden op pagina');
+  return null;
 }
 
 async function extractIntervals(page) {
@@ -1088,7 +1163,7 @@ async function scrapeQuotelink(vin, kmStand) {
     const vehicleData = await searchAndExtractVehicle(page, vin);
 
     // STAP 3: Skip recalls — ga direct naar Menu pricing
-    const { intervals, interval_pricing, prices } = await extractMaintenance(page, context, kmStand);
+    const { intervals, interval_pricing, prices, service_frequency } = await extractMaintenance(page, context, kmStand);
 
     console.log('[Quotelink] VIN lookup voltooid!');
     return {
@@ -1096,7 +1171,8 @@ async function scrapeQuotelink(vin, kmStand) {
       recalls: [],  // Niet opgehaald bij VIN-only lookup
       intervals,
       interval_pricing,
-      prices
+      prices,
+      service_frequency
     };
 
   } catch (error) {
