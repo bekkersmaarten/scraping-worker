@@ -1336,7 +1336,7 @@ async function activateWarranty(vin, kmStand, customerEmail) {
           if (iconStatus === 'hidden') {
             await browser.close();
             return {
-              status: 'no_icon',
+              status: 'not_eligible',
               vin,
               message: 'StellaCare iconen aanwezig maar verborgen — voertuig komt niet in aanmerking',
               vehicle: vehicleData
@@ -1367,7 +1367,7 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       console.log('[Warranty] Geen StellaCare elementen gevonden in enig frame');
       await browser.close();
       return {
-        status: 'no_icon',
+        status: 'not_eligible',
         vin,
         message: 'Geen 2+6 garantie-icoon gevonden — voertuig komt niet in aanmerking',
         vehicle: vehicleData
