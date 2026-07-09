@@ -558,6 +558,14 @@ async function extractMaintenance(page, context, kmStand) {
   await menuPricingPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   await menuPricingPage.waitForTimeout(3000);
 
+  // ── Probeer frequentie VÓÓR "GA VERDER" te extraheren ──
+  // Op sommige systemen (Opel/Vauxhall) staat de frequentie op de Vehicle-pagina
+  console.log('[Maintenance] Frequentie zoeken VOOR GA VERDER...');
+  let serviceFrequency = await extractServiceFrequency(menuPricingPage);
+  if (serviceFrequency) {
+    console.log('[Maintenance] Frequentie gevonden op Vehicle-pagina (voor GA VERDER)!');
+  }
+
   // We landen op de Prijsopgave/Vehicle-pagina. Klik "GA VERDER" om naar
   // de interval/prijzen-selectie te gaan.
   console.log('[Maintenance] Klikken op GA VERDER...');
@@ -578,18 +586,77 @@ async function extractMaintenance(page, context, kmStand) {
     }
   }
 
+  // Wacht tot de pagina echt content heeft (niet alleen "Nieuwsbrief")
+  // Opel/Vauxhall pages laden async na GA VERDER
+  console.log('[Maintenance] Wachten op content laden...');
+  for (let waitAttempt = 0; waitAttempt < 5; waitAttempt++) {
+    const contentCheck = await menuPricingPage.evaluate(() => {
+      const text = (document.body?.innerText || '').trim();
+      // Check ook frames
+      let frameText = '';
+      try {
+        const iframes = document.querySelectorAll('iframe');
+        for (const iframe of iframes) {
+          try { frameText += (iframe.contentDocument?.body?.innerText || ''); } catch(e) {}
+        }
+      } catch(e) {}
+      const allText = text + frameText;
+      // Als er km-waarden, frequentie-tekst of intervallen op de pagina staan, is content geladen
+      return {
+        length: allText.length,
+        hasKm: /\d{2,3}[.\s]?000\s*(km|KM)/i.test(allText),
+        hasFreq: /[Ee]lk|[Tt]ous|[Ee]very|frequen/i.test(allText),
+        preview: allText.substring(0, 200)
+      };
+    });
+    console.log(`[Maintenance] Content check #${waitAttempt + 1}: ${contentCheck.length} chars, hasKm=${contentCheck.hasKm}, hasFreq=${contentCheck.hasFreq}, preview: ${contentCheck.preview.substring(0, 100)}`);
+    if (contentCheck.hasKm || contentCheck.hasFreq || contentCheck.length > 500) {
+      break;
+    }
+    // Check ook Playwright frames (cross-origin iframes niet via DOM bereikbaar)
+    const frameTexts = [];
+    for (const frame of menuPricingPage.frames()) {
+      try {
+        const ft = await frame.evaluate(() => (document.body?.innerText || '').substring(0, 200));
+        if (ft.length > 10) frameTexts.push({ url: frame.url().substring(0, 80), len: ft.length, preview: ft.substring(0, 100) });
+      } catch(e) {}
+    }
+    if (frameTexts.length > 0) {
+      console.log(`[Maintenance] Playwright frames met content: ${JSON.stringify(frameTexts)}`);
+      const totalFrameLen = frameTexts.reduce((sum, f) => sum + f.len, 0);
+      if (totalFrameLen > 500) break;
+    }
+    await menuPricingPage.waitForTimeout(2000);
+  }
+
   // Screenshot voor debugging
   await menuPricingPage.screenshot({ path: 'menupricing-debug.png' });
   console.log('[Maintenance] Screenshot opgeslagen: menupricing-debug.png');
 
-  // Log pagina-inhoud voor debugging (clean whitespace)
+  // Log pagina-inhoud voor debugging (clean whitespace) — inclusief alle frames
   const pageText = await menuPricingPage.evaluate(() => {
     return (document.body?.innerText || '').replace(/[\t]+/g, ' ').replace(/\n{3,}/g, '\n\n').substring(0, 3000);
   });
-  console.log('[Maintenance] Pagina tekst (eerste 1500 chars):', pageText.substring(0, 1500));
+  console.log('[Maintenance] Main frame tekst (eerste 1500 chars):', pageText.substring(0, 1500));
 
-  // Extract de "Gebruikelijke frequentie" (bijv. "Elk 25000 Km / 1 jaar")
-  const serviceFrequency = await extractServiceFrequency(menuPricingPage);
+  // Log alle Playwright frames
+  const allFrames = menuPricingPage.frames();
+  console.log(`[Maintenance] Aantal Playwright frames: ${allFrames.length}`);
+  for (let i = 0; i < allFrames.length; i++) {
+    try {
+      const frameUrl = allFrames[i].url();
+      const frameText = await allFrames[i].evaluate(() => (document.body?.innerText || '').substring(0, 500));
+      console.log(`[Maintenance] Frame ${i}: URL=${frameUrl.substring(0, 100)}, tekst (${frameText.length} chars): ${frameText.substring(0, 200)}`);
+    } catch(e) {
+      console.log(`[Maintenance] Frame ${i}: niet bereikbaar (${e.message.substring(0, 60)})`);
+    }
+  }
+
+  // ── Frequentie extraheren NA "GA VERDER" (als niet eerder gevonden) ──
+  if (!serviceFrequency) {
+    console.log('[Maintenance] Frequentie zoeken NA GA VERDER...');
+    serviceFrequency = await extractServiceFrequency(menuPricingPage);
+  }
 
   // Extract intervallen
   const intervals = await extractIntervals(menuPricingPage);
@@ -622,26 +689,42 @@ async function extractMaintenance(page, context, kmStand) {
 async function extractServiceFrequency(page) {
   console.log('[Frequency] Extracting service frequentie...');
 
-  const framesToCheck = page.frames().length > 1 ? page.frames() : [page.mainFrame()];
+  // Check ALLE frames (inclusief cross-origin via Playwright)
+  const allFrames = page.frames();
+  const framesToCheck = allFrames.length > 0 ? allFrames : [page.mainFrame()];
+  console.log(`[Frequency] ${framesToCheck.length} frames te checken`);
 
-  for (const frame of framesToCheck) {
+  for (let fi = 0; fi < framesToCheck.length; fi++) {
+    const frame = framesToCheck[fi];
     try {
+      const frameUrl = frame.url();
       const freq = await frame.evaluate(() => {
         const bodyText = document.body?.innerText || '';
+
+        if (bodyText.trim().length < 20) {
+          return { error: 'empty_frame', text: bodyText.trim() };
+        }
 
         // Zoek het patroon — meerdere varianten:
         // "Elk 25000 Km / 1 jaar"
         // "Elke 30.000 km / 12 maanden"
         // "Tous les 30000 Km / 1 an" (Frans)
         // "Every 30000 Km / 1 year"
+        // Opel/Vauxhall varianten:
+        // "30 000 km of 12 maanden" / "30.000 km of 12 maanden"
+        // "30000 km / 12 months" / "30 000 km ou 12 mois"
         const patterns = [
-          /Elk[e]?\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?)/gi,
-          /[Tt]ous\s+les\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?)/gi,
-          /[Ee]very\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?)/gi,
+          /Elk[e]?\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
+          /[Tt]ous\s+les\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
+          /[Ee]very\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
+          // Opel-style: "30.000 km of 12 maanden" / "30 000 km ou 12 mois"
+          /(\d[\d. ]{3,})\s*[Kk][Mm]\s*(?:of|ou|or)\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
           // Fallback: gewoon een getal gevolgd door km / getal gevolgd door jaar/maand
-          /(\d[\d. ]{3,})\s*[Kk][Mm]\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?)/gi,
+          /(\d[\d. ]{3,})\s*[Kk][Mm]\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
           // "Gebruikelijke frequentie" sectie met los km-getal
-          /[Ff]req[a-z]*[.:]\s*(\d[\d. ]*)\s*[Kk][Mm]\s*[\/\-–]\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?)/gi
+          /[Ff]req[a-z]*[.:]\s*(\d[\d. ]*)\s*[Kk][Mm]\s*[\/\-–]\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
+          // Nog breder: km-getal gevolgd door interval op zelfde of volgende regel
+          /(\d{2,3}[.\s]?000)\s*[Kk][Mm][\s\S]{0,20}?(\d{1,2})\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi
         ];
 
         let allMatches = [];
@@ -654,7 +737,7 @@ async function extractServiceFrequency(page) {
         }
 
         if (allMatches.length === 0) {
-          // Geef de eerste 500 chars terug voor debugging
+          // Geef de eerste 800 chars terug voor debugging
           return { error: 'no_match', text: bodyText.substring(0, 800) };
         }
 
@@ -678,19 +761,28 @@ async function extractServiceFrequency(page) {
         };
       });
 
-      if (freq && freq.error) {
-        console.log(`[Frequency] Geen match gevonden. Pagina tekst: ${freq.text}`);
+      if (freq && freq.error === 'empty_frame') {
+        console.log(`[Frequency] Frame ${fi} (${frameUrl.substring(0, 80)}): leeg/te kort (${freq.text.length} chars)`);
+        continue;
+      }
+
+      if (freq && freq.error === 'no_match') {
+        console.log(`[Frequency] Frame ${fi} (${frameUrl.substring(0, 80)}): geen match. Tekst: ${freq.text.substring(0, 300)}`);
         continue;
       }
 
       if (freq) {
+        console.log(`[Frequency] GEVONDEN in frame ${fi} (${frameUrl.substring(0, 80)})`);
         console.log(`[Frequency] Normaal: ${freq.km} km / ${freq.months} maanden`);
         if (freq.km_heavy) {
           console.log(`[Frequency] Zwaar: ${freq.km_heavy} km / ${freq.months_heavy} maanden`);
         }
         return freq;
       }
-    } catch (e) { continue; }
+    } catch (e) {
+      console.log(`[Frequency] Frame ${fi}: error - ${e.message.substring(0, 100)}`);
+      continue;
+    }
   }
 
   console.log('[Frequency] Geen frequentie gevonden in enig frame');
