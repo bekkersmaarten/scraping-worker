@@ -629,40 +629,59 @@ async function extractServiceFrequency(page) {
       const freq = await frame.evaluate(() => {
         const bodyText = document.body?.innerText || '';
 
-        // Zoek het patroon "Elk XXXXX Km / Y jaar" of "Elk XXXXX km / Y jaar"
-        const matches = [...bodyText.matchAll(/Elk\s+(\d[\d.]*)\s*Km?\s*\/\s*(\d+)\s*(jaar|maand)/gi)];
+        // Zoek het patroon — meerdere varianten:
+        // "Elk 25000 Km / 1 jaar"
+        // "Elke 30.000 km / 12 maanden"
+        // "Tous les 30000 Km / 1 an" (Frans)
+        // "Every 30000 Km / 1 year"
+        const patterns = [
+          /Elk[e]?\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?)/gi,
+          /[Tt]ous\s+les\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?)/gi,
+          /[Ee]very\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?)/gi,
+          // Fallback: gewoon een getal gevolgd door km / getal gevolgd door jaar/maand
+          /(\d[\d. ]{3,})\s*[Kk][Mm]\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?)/gi,
+          // "Gebruikelijke frequentie" sectie met los km-getal
+          /[Ff]req[a-z]*[.:]\s*(\d[\d. ]*)\s*[Kk][Mm]\s*[\/\-–]\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?)/gi
+        ];
 
-        if (matches.length === 0) {
-          // Fallback: zoek alleen km-frequentie patronen
-          const kmMatch = bodyText.match(/(\d{4,6})\s*Km?\s*\/\s*(\d+)\s*(jaar|maand)/i);
-          if (kmMatch) {
-            const km = parseInt(kmMatch[1].replace(/\./g, ''));
-            const period = parseInt(kmMatch[2]);
-            const months = kmMatch[3].toLowerCase() === 'jaar' ? period * 12 : period;
-            return { km, months, km_heavy: null, months_heavy: null, raw: kmMatch[0] };
+        let allMatches = [];
+        for (const pattern of patterns) {
+          const matches = [...bodyText.matchAll(pattern)];
+          if (matches.length > 0) {
+            allMatches = matches;
+            break;
           }
-          return null;
         }
 
-        // Eerste match = normaal, tweede match = zwaar (indien aanwezig)
+        if (allMatches.length === 0) {
+          // Geef de eerste 500 chars terug voor debugging
+          return { error: 'no_match', text: bodyText.substring(0, 800) };
+        }
+
         const parseMatch = (m) => {
-          const km = parseInt(m[1].replace(/\./g, ''));
+          const km = parseInt(m[1].replace(/[. ]/g, ''));
           const period = parseInt(m[2]);
-          const months = m[3].toLowerCase() === 'jaar' ? period * 12 : period;
+          const unit = m[3].toLowerCase();
+          const months = (unit.startsWith('jaar') || unit.startsWith('year') || unit.startsWith('an')) ? period * 12 : period;
           return { km, months };
         };
 
-        const normal = parseMatch(matches[0]);
-        const heavy = matches.length > 1 ? parseMatch(matches[1]) : null;
+        const normal = parseMatch(allMatches[0]);
+        const heavy = allMatches.length > 1 ? parseMatch(allMatches[1]) : null;
 
         return {
           km: normal.km,
           months: normal.months,
           km_heavy: heavy ? heavy.km : null,
           months_heavy: heavy ? heavy.months : null,
-          raw: matches.map(m => m[0]).join(' | ')
+          raw: allMatches.map(m => m[0]).join(' | ')
         };
       });
+
+      if (freq && freq.error) {
+        console.log(`[Frequency] Geen match gevonden. Pagina tekst: ${freq.text}`);
+        continue;
+      }
 
       if (freq) {
         console.log(`[Frequency] Normaal: ${freq.km} km / ${freq.months} maanden`);
@@ -674,7 +693,7 @@ async function extractServiceFrequency(page) {
     } catch (e) { continue; }
   }
 
-  console.log('[Frequency] Geen frequentie gevonden op pagina');
+  console.log('[Frequency] Geen frequentie gevonden in enig frame');
   return null;
 }
 
