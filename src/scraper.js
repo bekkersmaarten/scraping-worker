@@ -1803,9 +1803,9 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       await warrantyPage.screenshot({ path: `warranty-result-debug-${Date.now()}.png` });
       await browser.close();
       return {
-        status: 'unknown',
+        status: 'error',
         vin,
-        message: 'Formulier ingediend maar bevestiging niet herkend',
+        message: 'Formulier ingediend maar bevestiging niet herkend — controleer handmatig',
         vehicle: vehicleData,
         result_text: resultText.substring(0, 500)
       };
