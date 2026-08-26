@@ -1822,34 +1822,74 @@ async function activateWarranty(vin, kmStand, customerEmail) {
         }
       }
 
-      // ── Methode 2: Klik op element met tekst "Normaal" via evaluate ──
+      // ── Methode 2: Zoek <span class="mr-1">Normaal</span> en klik de parent-keten ──
       if (!radioSelected) {
         const clicked = await formPage.evaluate(() => {
-          // Zoek alle klikbare elementen met tekst "Normaal"
-          const candidates = Array.from(document.querySelectorAll('td, th, span, div, label, a, button, mat-radio-button, .mat-radio-button'));
-          for (const el of candidates) {
-            const text = el.textContent?.trim();
-            if (text === 'Normaal' || text === 'Normal') {
+          // Zoek de span met "Normaal" (we weten dat die class="mr-1" heeft)
+          const spans = Array.from(document.querySelectorAll('span'));
+          let normaalSpan = null;
+          for (const span of spans) {
+            if (span.textContent?.trim() === 'Normaal' || span.textContent?.trim() === 'Normal') {
+              normaalSpan = span;
+              break;
+            }
+          }
+          if (!normaalSpan) return { found: false };
+
+          // Log de volledige parent-keten (voor debugging)
+          const parentChain = [];
+          let el = normaalSpan;
+          for (let i = 0; i < 6 && el; i++) {
+            parentChain.push({
+              tag: el.tagName,
+              class: el.className?.toString?.()?.substring(0, 100) || '',
+              id: el.id || '',
+              role: el.getAttribute?.('role') || '',
+              onclick: el.getAttribute?.('onclick')?.substring(0, 100) || '',
+              href: el.getAttribute?.('href')?.substring(0, 100) || '',
+              html: el.outerHTML?.substring(0, 300) || ''
+            });
+            el = el.parentElement;
+          }
+
+          // Probeer elk niveau in de parent-keten te klikken (van span omhoog)
+          // Stop bij het eerste niveau dat een onclick, href, role, of event listener heeft
+          const clickResults = [];
+          el = normaalSpan;
+          for (let i = 0; i < 5 && el; i++) {
+            const tag = el.tagName;
+            const hasOnclick = !!el.getAttribute?.('onclick');
+            const hasHref = !!el.getAttribute?.('href');
+            const hasRole = !!el.getAttribute?.('role');
+            const isClickable = tag === 'A' || tag === 'BUTTON' || tag === 'LABEL' || hasOnclick || hasHref || hasRole;
+
+            if (isClickable || i >= 1) {
+              // Klik dit niveau
               el.click();
-              return `clicked <${el.tagName}> with text "${text}"`;
+              clickResults.push(`clicked <${tag}> (level ${i})`);
+              // Probeer ook dispatchEvent voor Angular
+              try {
+                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+              } catch(e) {}
             }
+
+            el = el.parentElement;
           }
-          // Breder: zoek in tabelcellen
-          const tds = Array.from(document.querySelectorAll('td'));
-          for (const td of tds) {
-            if (td.textContent?.trim()?.includes('Normaal')) {
-              // Klik op de eerste klikbare child of de cel zelf
-              const clickable = td.querySelector('input, label, span, a, mat-radio-button, .mat-radio-button, div[role="radio"]');
-              if (clickable) { clickable.click(); return `clicked child <${clickable.tagName}> in td`; }
-              td.click();
-              return 'clicked td with Normaal';
-            }
-          }
-          return null;
+
+          return { found: true, parentChain, clickResults };
         });
-        if (clicked) {
+
+        if (clicked.found) {
           radioSelected = true;
-          console.log(`[Warranty] Gebruiksvoorwaarden: ${clicked}`);
+          console.log(`[Warranty] "Normaal" gevonden! Parent-keten:`);
+          clicked.parentChain.forEach((p, i) => {
+            console.log(`[Warranty]   Level ${i}: <${p.tag}> class="${p.class}" id="${p.id}" role="${p.role}" onclick="${p.onclick}" href="${p.href}"`);
+            console.log(`[Warranty]   HTML: ${p.html}`);
+          });
+          console.log(`[Warranty] Klik-acties: ${clicked.clickResults.join(', ')}`);
+        } else {
+          console.log('[Warranty] Geen element met tekst "Normaal" gevonden op de pagina');
         }
       }
 
