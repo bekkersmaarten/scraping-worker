@@ -1959,72 +1959,136 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     }
 
     // ══════════════════════════════════════════════════════════════
-    // STAP 8: Toggles/checkboxes aanvinken
+    // STAP 8: ALLE toggles/checkboxes aanvinken (agreement velden)
+    // Zoek op formPage (kan iframe zijn) EN warrantyPage
+    // Typen: mat-slide-toggle, mat-checkbox, input[type="checkbox"]
     // ══════════════════════════════════════════════════════════════
     console.log('[Warranty] STAP 8: Toggles/checkboxes...');
-    const slideToggles = await warrantyPage.$$('mat-slide-toggle, .mat-slide-toggle');
-    console.log(`[Warranty] ${slideToggles.length} slide toggles gevonden`);
 
-    if (slideToggles.length > 0) {
-      for (const toggle of slideToggles) {
-        const isChecked = await toggle.evaluate(el => el.classList.contains('mat-checked'));
-        if (!isChecked) {
-          await toggle.evaluate(el => {
-            const label = el.querySelector('.mat-slide-toggle-label, label');
-            if (label) { label.click(); } else { el.click(); }
-          });
-          await warrantyPage.waitForTimeout(300);
-          console.log('[Warranty] Slide toggle aangezet');
-        } else {
-          console.log('[Warranty] Slide toggle stond al aan');
-        }
-      }
-    } else {
-      const checkboxes = await warrantyPage.$$('input[type="checkbox"]');
-      console.log(`[Warranty] ${checkboxes.length} gewone checkboxes gevonden`);
-      for (const cb of checkboxes) {
-        const isChecked = await cb.isChecked();
-        if (!isChecked) {
-          const clicked = await cb.evaluate(el => {
-            const label = el.closest('label') || el.parentElement;
-            if (label && label !== el) { label.click(); return 'label'; }
-            el.click(); return 'direct';
-          });
-          console.log(`[Warranty] Checkbox aangevinkt via ${clicked}`);
-          await warrantyPage.waitForTimeout(300);
-        }
-      }
-    }
+    // Wacht even zodat eventuele dynamische agreement-velden geladen zijn
+    await formPage.waitForTimeout(2000);
 
-    // ══════════════════════════════════════════════════════════════
-    // STAP 8b: Verificatie vóór submit
-    // ══════════════════════════════════════════════════════════════
-    const verifyKm = await formPage.locator('input[name*="ilomet" i], input[id*="ilomet" i]').first().inputValue().catch(() => '');
-    const verifyRadio = await formPage.locator('input[type="radio"]:checked').count().catch(() => 0);
-    console.log(`[Warranty] Pre-submit verificatie: km="${verifyKm}", radio_checked=${verifyRadio}`);
+    // Scroll naar beneden om eventueel verborgen velden zichtbaar te maken
+    await formPage.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+    await formPage.waitForTimeout(500);
 
-    const missingRequired = await warrantyPage.evaluate(() => {
-      const required = document.querySelectorAll('input[required], select[required]');
-      const empty = [];
-      for (const el of required) {
-        if (el.type === 'radio') {
-          const name = el.name;
-          if (name && !document.querySelector(`input[type="radio"][name="${name}"]:checked`)) {
-            empty.push(`radio:${name}`);
-          }
-        } else if (!el.value) {
-          empty.push(`${el.type || 'input'}:${el.name || el.id || '?'}`);
-        }
-      }
-      return [...new Set(empty)];
+    // Diagnostiek: inventariseer ALLE toggle/checkbox elementen op formPage
+    const allToggleElements = await formPage.evaluate(() => {
+      const elements = [];
+      document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle').forEach(el => {
+        elements.push({ type: 'mat-slide-toggle', checked: el.classList.contains('mat-checked'), text: el.textContent?.trim()?.substring(0, 100), id: el.id });
+      });
+      document.querySelectorAll('mat-checkbox, .mat-checkbox').forEach(el => {
+        elements.push({ type: 'mat-checkbox', checked: el.classList.contains('mat-checkbox-checked'), text: el.textContent?.trim()?.substring(0, 100), id: el.id });
+      });
+      document.querySelectorAll('input[type="checkbox"]').forEach(el => {
+        elements.push({ type: 'checkbox', checked: el.checked, text: (el.closest('label')?.textContent || el.parentElement?.textContent || '').trim().substring(0, 100), id: el.id, name: el.name });
+      });
+      return elements;
     });
-    if (missingRequired.length > 0) {
-      console.log(`[Warranty] WAARSCHUWING: ${missingRequired.length} verplichte velden nog leeg: ${missingRequired.join(', ')}`);
+    console.log(`[Warranty] Alle toggle/checkbox elementen op formPage: ${JSON.stringify(allToggleElements)}`);
+
+    // 8a: Unchecked mat-slide-toggles aanzetten (behalve Gebruiksvoorwaarden die al aan staat)
+    const uncheckedSlideToggles = await formPage.$$('mat-slide-toggle:not(.mat-checked), .mat-slide-toggle:not(.mat-checked)');
+    console.log(`[Warranty] ${uncheckedSlideToggles.length} unchecked slide toggles`);
+    for (const toggle of uncheckedSlideToggles) {
+      const text = await toggle.evaluate(el => el.textContent?.trim()?.substring(0, 80));
+      await toggle.evaluate(el => {
+        const label = el.querySelector('.mat-slide-toggle-label, label');
+        if (label) { label.click(); } else { el.click(); }
+      });
+      await formPage.waitForTimeout(500);
+      console.log(`[Warranty] Slide toggle aangezet: "${text}"`);
     }
 
-    // STAP 9: Klik "Indienen"
+    // 8b: Unchecked mat-checkboxes aanvinken
+    const uncheckedMatCbs = await formPage.$$('mat-checkbox:not(.mat-checkbox-checked), .mat-checkbox:not(.mat-checkbox-checked)');
+    console.log(`[Warranty] ${uncheckedMatCbs.length} unchecked mat-checkboxes`);
+    for (const cb of uncheckedMatCbs) {
+      const text = await cb.evaluate(el => el.textContent?.trim()?.substring(0, 80));
+      await cb.evaluate(el => {
+        const label = el.querySelector('.mat-checkbox-label, label, .mat-checkbox-inner-container');
+        if (label) { label.click(); } else { el.click(); }
+      });
+      await formPage.waitForTimeout(500);
+      console.log(`[Warranty] Mat-checkbox aangevinkt: "${text}"`);
+    }
+
+    // 8c: Unchecked reguliere checkboxes aanvinken
+    const uncheckedCbs = await formPage.$$('input[type="checkbox"]:not(:checked)');
+    console.log(`[Warranty] ${uncheckedCbs.length} unchecked regular checkboxes`);
+    for (const cb of uncheckedCbs) {
+      const text = await cb.evaluate(el => {
+        const label = el.closest('label') || el.parentElement;
+        return label ? label.textContent?.trim()?.substring(0, 80) : '';
+      });
+      await cb.evaluate(el => {
+        const label = el.closest('label') || el.parentElement;
+        if (label && label !== el) { label.click(); } else { el.click(); }
+      });
+      await formPage.waitForTimeout(300);
+      console.log(`[Warranty] Checkbox aangevinkt: "${text}"`);
+    }
+
+    // Als formPage !== warrantyPage, doe hetzelfde op warrantyPage
+    if (formPage !== warrantyPage) {
+      const wpToggles = await warrantyPage.$$('mat-slide-toggle:not(.mat-checked), .mat-slide-toggle:not(.mat-checked)');
+      const wpMatCbs = await warrantyPage.$$('mat-checkbox:not(.mat-checkbox-checked), .mat-checkbox:not(.mat-checkbox-checked)');
+      const wpCbs = await warrantyPage.$$('input[type="checkbox"]:not(:checked)');
+      console.log(`[Warranty] warrantyPage extra: ${wpToggles.length} toggles, ${wpMatCbs.length} mat-cb, ${wpCbs.length} cb`);
+      for (const t of wpToggles) {
+        await t.evaluate(el => { const l = el.querySelector('.mat-slide-toggle-label, label'); if (l) l.click(); else el.click(); });
+        await warrantyPage.waitForTimeout(500);
+      }
+      for (const c of wpMatCbs) {
+        await c.evaluate(el => { const l = el.querySelector('.mat-checkbox-label, label, .mat-checkbox-inner-container'); if (l) l.click(); else el.click(); });
+        await warrantyPage.waitForTimeout(500);
+      }
+      for (const c of wpCbs) {
+        await c.evaluate(el => { const l = el.closest('label') || el.parentElement; if (l && l !== el) l.click(); else el.click(); });
+        await warrantyPage.waitForTimeout(300);
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // STAP 8d: Verificatie vóór submit
+    // ══════════════════════════════════════════════════════════════
+    const verifyKm = await formPage.locator('input[type="number"]:not([disabled])').first().inputValue().catch(() => '');
+    const verifyEmail = await formPage.locator('input[type="email"]:not([disabled])').first().inputValue().catch(() => '');
+    console.log(`[Warranty] Pre-submit verificatie: km="${verifyKm}", email="${verifyEmail ? 'filled' : 'empty'}"`);
+
+    // Hercheck alle toggle-states na aanvinken
+    const postToggleState = await formPage.evaluate(() => {
+      const items = [];
+      document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle').forEach(el => {
+        items.push({ type: 'slide', checked: el.classList.contains('mat-checked'), text: el.textContent?.trim()?.substring(0, 60) });
+      });
+      document.querySelectorAll('mat-checkbox, .mat-checkbox').forEach(el => {
+        items.push({ type: 'matcb', checked: el.classList.contains('mat-checkbox-checked'), text: el.textContent?.trim()?.substring(0, 60) });
+      });
+      return items;
+    });
+    console.log(`[Warranty] Post-toggle state: ${JSON.stringify(postToggleState)}`);
+
+    // STAP 9: Klik "Indienen" — zoek op formPage eerst, dan warrantyPage
     console.log('[Warranty] Klikken op Indienen...');
-    const submitBtn = await warrantyPage.$('button:has-text("Indienen"), input[value*="Indienen"], button:has-text("Submit"), input[type="submit"]');
+    let submitBtn = await formPage.$('button:has-text("Indienen"), input[value*="Indienen"], button:has-text("Submit"), input[type="submit"]');
+    if (!submitBtn && formPage !== warrantyPage) {
+      submitBtn = await warrantyPage.$('button:has-text("Indienen"), input[value*="Indienen"], button:has-text("Submit"), input[type="submit"]');
+    }
+    if (!submitBtn) {
+      // Fallback: zoek elke button met "indienen" in de tekst (case insensitive)
+      submitBtn = await formPage.$('button');
+      const allBtns = await formPage.$$('button');
+      for (const btn of allBtns) {
+        const txt = await btn.evaluate(el => el.textContent?.trim()?.toLowerCase());
+        if (txt && (txt.includes('indienen') || txt.includes('submit') || txt.includes('bevestig'))) {
+          submitBtn = btn;
+          console.log(`[Warranty] Submit knop gevonden via fallback: "${txt}"`);
+          break;
+        }
+      }
+    }
     if (!submitBtn) {
       await warrantyPage.screenshot({ path: `warranty-submit-debug-${Date.now()}.png` });
       await browser.close();
@@ -2032,6 +2096,7 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     }
 
     await submitBtn.click();
+    console.log('[Warranty] Indienen geklikt, wachten op resultaat...');
     await warrantyPage.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
     await warrantyPage.waitForTimeout(3000);
 
