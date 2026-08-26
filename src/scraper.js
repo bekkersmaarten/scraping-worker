@@ -1850,19 +1850,39 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     let kmFilled = false;
     let emailFilled = false;
 
-    // Specifieke selectors (name/id patronen die Servicebox gebruikt)
+    // Specifieke selectors — de "Operatie lijn" formulieren hebben inputs zonder name/id,
+    // maar er is precies 1 input[type="number"] (km) en 1 input[type="email"] (email)
+    try {
+      const kmByType = formPage.locator('input[type="number"]:not([disabled])').first();
+      if (await kmByType.count() > 0) {
+        await kmByType.fill(String(kmStand));
+        kmFilled = true;
+        console.log(`[Warranty] Kilometerstand ingevuld via type=number: ${kmStand}`);
+      }
+    } catch (e) { console.log(`[Warranty] km type=number fout: ${e.message.substring(0, 80)}`); }
+
+    try {
+      const emailByType = formPage.locator('input[type="email"]:not([disabled])').first();
+      if (await emailByType.count() > 0) {
+        await emailByType.fill(customerEmail);
+        emailFilled = true;
+        console.log('[Warranty] E-mailadres ingevuld via type=email');
+      }
+    } catch (e) { console.log(`[Warranty] email type=email fout: ${e.message.substring(0, 80)}`); }
+
+    // Fallback: name/id patronen (voor andere formulier-varianten)
     try {
       const kmField = formPage.locator('input[name*="ilomet" i], input[id*="ilomet" i], input[name*="ileage" i], input[id*="km" i]').first();
-      if (await kmField.count() > 0) {
+      if (!kmFilled && await kmField.count() > 0) {
         await kmField.fill(String(kmStand));
         kmFilled = true;
-        console.log(`[Warranty] Kilometerstand ingevuld via specifieke selector: ${kmStand}`);
+        console.log(`[Warranty] Kilometerstand ingevuld via name/id selector: ${kmStand}`);
       }
     } catch (e) { console.log(`[Warranty] km specifieke selector fout: ${e.message.substring(0, 80)}`); }
 
     try {
-      const emailField = formPage.locator('input[type="email"], input[name*="mail" i], input[id*="mail" i]').first();
-      if (await emailField.count() > 0) {
+      const emailField = formPage.locator('input[name*="mail" i], input[id*="mail" i]').first();
+      if (!emailFilled && await emailField.count() > 0) {
         await emailField.fill(customerEmail);
         emailFilled = true;
         console.log('[Warranty] E-mailadres ingevuld via specifieke selector');
