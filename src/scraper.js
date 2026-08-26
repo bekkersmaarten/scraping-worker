@@ -1754,50 +1754,122 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     // STAP 6: Gebruiksvoorwaarden radio selecteren (MOET EERST)
     // Bij voertuigen met "Operatie lijn"-tabel zijn km/email velden
     // disabled totdat Normaal of Verzwaard is gekozen.
+    // Het formulier gebruikt Angular Material (mat-radio-button) —
+    // de echte <input type="radio"> is verborgen, net als mat-slide-toggle.
     // ══════════════════════════════════════════════════════════════
     console.log('[Warranty] STAP 6: Checken op Gebruiksvoorwaarden radio...');
     let radioSelected = false;
+
+    // Debug: dump alle radio-achtige elementen op de pagina
+    const radioDebug = await formPage.evaluate(() => {
+      const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
+      const matRadios = Array.from(document.querySelectorAll('mat-radio-button, .mat-radio-button'));
+      const normaalEls = Array.from(document.querySelectorAll('*')).filter(el =>
+        el.textContent?.trim() === 'Normaal' || el.textContent?.trim() === 'Normal'
+      ).map(el => ({ tag: el.tagName, class: el.className?.substring?.(0, 100) || '', html: el.outerHTML?.substring(0, 200) }));
+      return {
+        radioCount: radios.length,
+        radios: radios.map(r => ({ name: r.name, value: r.value, checked: r.checked, disabled: r.disabled, visible: r.offsetParent !== null, html: r.outerHTML?.substring(0, 200) })),
+        matRadioCount: matRadios.length,
+        matRadios: matRadios.map(r => ({ class: r.className?.substring?.(0, 100), checked: r.classList?.contains('mat-radio-checked'), text: r.textContent?.trim()?.substring(0, 50), html: r.outerHTML?.substring(0, 300) })),
+        normaalElements: normaalEls.slice(0, 5)
+      };
+    });
+    console.log(`[Warranty] Radio debug: ${radioDebug.radioCount} input[radio], ${radioDebug.matRadioCount} mat-radio-button`);
+    radioDebug.radios.forEach(r => console.log(`[Warranty]   RADIO: name=${r.name}, value=${r.value}, checked=${r.checked}, disabled=${r.disabled}, visible=${r.visible}`));
+    radioDebug.matRadios.forEach(r => console.log(`[Warranty]   MAT-RADIO: text="${r.text}", checked=${r.checked}, class=${r.class}`));
+    radioDebug.normaalElements.forEach(r => console.log(`[Warranty]   "Normaal" element: <${r.tag}> class=${r.class}`));
+
     try {
-      // Methode 1: zoek in de "Operatie lijn" / "Gebruiksvoorwaarden" tabel-rij
-      const tableRow = formPage.locator('table:has-text("Gebruiksvoorwaarden") tr:has(input[type="radio"])').first();
-      if (await tableRow.count() > 0) {
-        const rowRadio = tableRow.locator('input[type="radio"]').first();
-        if (await rowRadio.count() > 0) {
-          await rowRadio.check({ force: true });
-          radioSelected = true;
-          console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd (tabel-rij)');
+      // ── Methode 1: Angular Material mat-radio-button (meest waarschijnlijk) ──
+      if (!radioSelected) {
+        const matRadios = await formPage.$$('mat-radio-button, .mat-radio-button');
+        if (matRadios.length > 0) {
+          console.log(`[Warranty] ${matRadios.length} mat-radio-button(s) gevonden`);
+          // Klik de eerste (= "Normaal") als die niet al gecheckt is
+          for (const matRadio of matRadios) {
+            const info = await matRadio.evaluate(el => ({
+              text: el.textContent?.trim()?.substring(0, 50),
+              checked: el.classList.contains('mat-radio-checked')
+            }));
+            console.log(`[Warranty]   mat-radio: "${info.text}", checked=${info.checked}`);
+            if (!info.checked && (info.text.toLowerCase().includes('normaal') || info.text.toLowerCase().includes('normal'))) {
+              // Klik op het label/container (niet de verborgen input)
+              await matRadio.evaluate(el => {
+                const label = el.querySelector('.mat-radio-label, label');
+                if (label) { label.click(); } else { el.click(); }
+              });
+              radioSelected = true;
+              console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd (mat-radio-button)');
+              break;
+            }
+          }
+          // Als geen "Normaal" tekst gevonden, klik gewoon de eerste unchecked
+          if (!radioSelected) {
+            for (const matRadio of matRadios) {
+              const isChecked = await matRadio.evaluate(el => el.classList.contains('mat-radio-checked'));
+              if (!isChecked) {
+                await matRadio.evaluate(el => {
+                  const label = el.querySelector('.mat-radio-label, label');
+                  if (label) { label.click(); } else { el.click(); }
+                });
+                radioSelected = true;
+                console.log('[Warranty] Eerste unchecked mat-radio-button geselecteerd (fallback)');
+                break;
+              }
+            }
+          }
         }
       }
 
-      // Methode 2: zoek op value "Normaal"
+      // ── Methode 2: Klik op element met tekst "Normaal" via evaluate ──
       if (!radioSelected) {
-        const normaalRadio = formPage.locator(
-          'input[type="radio"][value*="ormaal" i], label:has-text("Normaal") input[type="radio"]'
-        ).first();
-        if (await normaalRadio.count() > 0) {
-          await normaalRadio.check({ force: true });
+        const clicked = await formPage.evaluate(() => {
+          // Zoek alle klikbare elementen met tekst "Normaal"
+          const candidates = Array.from(document.querySelectorAll('td, th, span, div, label, a, button, mat-radio-button, .mat-radio-button'));
+          for (const el of candidates) {
+            const text = el.textContent?.trim();
+            if (text === 'Normaal' || text === 'Normal') {
+              el.click();
+              return `clicked <${el.tagName}> with text "${text}"`;
+            }
+          }
+          // Breder: zoek in tabelcellen
+          const tds = Array.from(document.querySelectorAll('td'));
+          for (const td of tds) {
+            if (td.textContent?.trim()?.includes('Normaal')) {
+              // Klik op de eerste klikbare child of de cel zelf
+              const clickable = td.querySelector('input, label, span, a, mat-radio-button, .mat-radio-button, div[role="radio"]');
+              if (clickable) { clickable.click(); return `clicked child <${clickable.tagName}> in td`; }
+              td.click();
+              return 'clicked td with Normaal';
+            }
+          }
+          return null;
+        });
+        if (clicked) {
           radioSelected = true;
-          console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd (value match)');
+          console.log(`[Warranty] Gebruiksvoorwaarden: ${clicked}`);
         }
       }
 
-      // Methode 3: klik op label "Normaal"
+      // ── Methode 3: Standaard input[type="radio"] (voor niet-Angular formulieren) ──
       if (!radioSelected) {
-        const normaalLabel = formPage.locator('label', { hasText: /^\s*Normaal\s*$/i }).first();
-        if (await normaalLabel.count() > 0) {
-          await normaalLabel.click();
+        const plainRadio = formPage.locator('input[type="radio"]').first();
+        if (await plainRadio.count() > 0) {
+          await plainRadio.check({ force: true });
           radioSelected = true;
-          console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd via label-klik');
+          console.log('[Warranty] Eerste input[type="radio"] geselecteerd (plain fallback)');
         }
       }
 
-      // Methode 4: eerste radio op de pagina (als er überhaupt radios zijn)
+      // ── Methode 4: Zoek role="radio" (WAI-ARIA radios) ──
       if (!radioSelected) {
-        const anyRadio = formPage.locator('input[type="radio"]').first();
-        if (await anyRadio.count() > 0) {
-          await anyRadio.check({ force: true });
+        const ariaRadio = formPage.locator('[role="radio"]').first();
+        if (await ariaRadio.count() > 0) {
+          await ariaRadio.click();
           radioSelected = true;
-          console.log('[Warranty] Eerste radio-optie geselecteerd (fallback)');
+          console.log('[Warranty] ARIA role="radio" geselecteerd');
         }
       }
 
@@ -1805,13 +1877,20 @@ async function activateWarranty(vin, kmStand, customerEmail) {
         console.log('[Warranty] Geen radio-veld gevonden (niet nodig voor dit voertuig)');
       }
     } catch (e) {
-      console.log(`[Warranty] Gebruiksvoorwaarden radio fout: ${e.message.substring(0, 150)}`);
+      console.log(`[Warranty] Gebruiksvoorwaarden radio fout: ${e.message.substring(0, 200)}`);
     }
 
     // Wacht tot velden enabled worden na radiokeuze
     if (radioSelected) {
-      await formPage.waitForTimeout(1500);
-      console.log('[Warranty] Gewacht op velden na radiokeuze');
+      await formPage.waitForTimeout(2000);
+      console.log('[Warranty] Gewacht 2s op velden na radiokeuze');
+      // Verifieer dat de radio echt geselecteerd is
+      const radioVerify = await formPage.evaluate(() => {
+        const checked = document.querySelector('input[type="radio"]:checked');
+        const matChecked = document.querySelector('.mat-radio-checked, mat-radio-button.mat-radio-checked');
+        return { plainChecked: !!checked, matChecked: !!matChecked };
+      });
+      console.log(`[Warranty] Radio verificatie: plainChecked=${radioVerify.plainChecked}, matChecked=${radioVerify.matChecked}`);
     }
 
     // ══════════════════════════════════════════════════════════════
