@@ -1751,186 +1751,95 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     }
 
     // ══════════════════════════════════════════════════════════════
-    // STAP 6: Gebruiksvoorwaarden radio selecteren (MOET EERST)
-    // Bij voertuigen met "Operatie lijn"-tabel zijn km/email velden
-    // disabled totdat Normaal of Verzwaard is gekozen.
-    // Het formulier gebruikt Angular Material (mat-radio-button) —
-    // de echte <input type="radio"> is verborgen, net als mat-slide-toggle.
+    // STAP 6: Gebruiksvoorwaarden mat-slide-toggle activeren (MOET EERST)
+    // De keuze Normaal/Verzwaard is een mat-slide-toggle naast <span class="mr-1">Normaal</span>.
+    // Structuur: <div class="in-column-value"><label>Gebruiksvoorwaarden</label>
+    //   <div class="d-flex"><span class="mr-1">Normaal</span><mat-slide-toggle ...></div></div>
+    // km/email velden zijn disabled totdat deze toggle geactiveerd is.
     // ══════════════════════════════════════════════════════════════
-    console.log('[Warranty] STAP 6: Checken op Gebruiksvoorwaarden radio...');
-    let radioSelected = false;
-
-    // Debug: dump alle radio-achtige elementen op de pagina
-    const radioDebug = await formPage.evaluate(() => {
-      const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
-      const matRadios = Array.from(document.querySelectorAll('mat-radio-button, .mat-radio-button'));
-      const normaalEls = Array.from(document.querySelectorAll('*')).filter(el =>
-        el.textContent?.trim() === 'Normaal' || el.textContent?.trim() === 'Normal'
-      ).map(el => ({ tag: el.tagName, class: el.className?.substring?.(0, 100) || '', html: el.outerHTML?.substring(0, 200) }));
-      return {
-        radioCount: radios.length,
-        radios: radios.map(r => ({ name: r.name, value: r.value, checked: r.checked, disabled: r.disabled, visible: r.offsetParent !== null, html: r.outerHTML?.substring(0, 200) })),
-        matRadioCount: matRadios.length,
-        matRadios: matRadios.map(r => ({ class: r.className?.substring?.(0, 100), checked: r.classList?.contains('mat-radio-checked'), text: r.textContent?.trim()?.substring(0, 50), html: r.outerHTML?.substring(0, 300) })),
-        normaalElements: normaalEls.slice(0, 5)
-      };
-    });
-    console.log(`[Warranty] Radio debug: ${radioDebug.radioCount} input[radio], ${radioDebug.matRadioCount} mat-radio-button`);
-    radioDebug.radios.forEach(r => console.log(`[Warranty]   RADIO: name=${r.name}, value=${r.value}, checked=${r.checked}, disabled=${r.disabled}, visible=${r.visible}`));
-    radioDebug.matRadios.forEach(r => console.log(`[Warranty]   MAT-RADIO: text="${r.text}", checked=${r.checked}, class=${r.class}`));
-    radioDebug.normaalElements.forEach(r => console.log(`[Warranty]   "Normaal" element: <${r.tag}> class=${r.class}`));
+    console.log('[Warranty] STAP 6: Gebruiksvoorwaarden toggle activeren...');
+    let gebruiksToggled = false;
 
     try {
-      // ── Methode 1: Angular Material mat-radio-button (meest waarschijnlijk) ──
-      if (!radioSelected) {
-        const matRadios = await formPage.$$('mat-radio-button, .mat-radio-button');
-        if (matRadios.length > 0) {
-          console.log(`[Warranty] ${matRadios.length} mat-radio-button(s) gevonden`);
-          // Klik de eerste (= "Normaal") als die niet al gecheckt is
-          for (const matRadio of matRadios) {
-            const info = await matRadio.evaluate(el => ({
-              text: el.textContent?.trim()?.substring(0, 50),
-              checked: el.classList.contains('mat-radio-checked')
-            }));
-            console.log(`[Warranty]   mat-radio: "${info.text}", checked=${info.checked}`);
-            if (!info.checked && (info.text.toLowerCase().includes('normaal') || info.text.toLowerCase().includes('normal'))) {
-              // Klik op het label/container (niet de verborgen input)
-              await matRadio.evaluate(el => {
-                const label = el.querySelector('.mat-radio-label, label');
-                if (label) { label.click(); } else { el.click(); }
-              });
-              radioSelected = true;
-              console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd (mat-radio-button)');
-              break;
-            }
-          }
-          // Als geen "Normaal" tekst gevonden, klik gewoon de eerste unchecked
-          if (!radioSelected) {
-            for (const matRadio of matRadios) {
-              const isChecked = await matRadio.evaluate(el => el.classList.contains('mat-radio-checked'));
-              if (!isChecked) {
-                await matRadio.evaluate(el => {
-                  const label = el.querySelector('.mat-radio-label, label');
-                  if (label) { label.click(); } else { el.click(); }
-                });
-                radioSelected = true;
-                console.log('[Warranty] Eerste unchecked mat-radio-button geselecteerd (fallback)');
-                break;
-              }
+      // Zoek de mat-slide-toggle die bij "Gebruiksvoorwaarden" / "Normaal" hoort
+      const toggleResult = await formPage.evaluate(() => {
+        // Zoek de span met "Normaal" — de toggle zit als sibling in dezelfde d-flex container
+        const spans = Array.from(document.querySelectorAll('span'));
+        for (const span of spans) {
+          if (span.textContent?.trim() === 'Normaal' || span.textContent?.trim() === 'Normal') {
+            // De mat-slide-toggle is een sibling van deze span in de d-flex parent
+            const parent = span.parentElement;
+            if (!parent) continue;
+            const toggle = parent.querySelector('mat-slide-toggle, .mat-slide-toggle');
+            if (toggle) {
+              const isChecked = toggle.classList.contains('mat-checked');
+              // Klik de toggle-label om te activeren (= "Normaal" kiezen)
+              const label = toggle.querySelector('.mat-slide-toggle-label, label');
+              if (label) { label.click(); } else { toggle.click(); }
+              return { found: true, clicked: 'sibling-toggle', wasChecked: isChecked };
             }
           }
         }
-      }
 
-      // ── Methode 2: Zoek <span class="mr-1">Normaal</span> en klik de parent-keten ──
-      if (!radioSelected) {
-        const clicked = await formPage.evaluate(() => {
-          // Zoek de span met "Normaal" (we weten dat die class="mr-1" heeft)
-          const spans = Array.from(document.querySelectorAll('span'));
-          let normaalSpan = null;
-          for (const span of spans) {
-            if (span.textContent?.trim() === 'Normaal' || span.textContent?.trim() === 'Normal') {
-              normaalSpan = span;
-              break;
+        // Fallback: zoek de toggle in de "in-column-value" div die ook "Gebruiksvoorwaarden" bevat
+        const valueDivs = document.querySelectorAll('.in-column-value, [class*="column-value"]');
+        for (const div of valueDivs) {
+          if (div.textContent?.includes('Gebruiksvoorwaarden')) {
+            const toggle = div.querySelector('mat-slide-toggle, .mat-slide-toggle');
+            if (toggle) {
+              const isChecked = toggle.classList.contains('mat-checked');
+              const label = toggle.querySelector('.mat-slide-toggle-label, label');
+              if (label) { label.click(); } else { toggle.click(); }
+              return { found: true, clicked: 'value-div-toggle', wasChecked: isChecked };
             }
           }
-          if (!normaalSpan) return { found: false };
-
-          // Log de volledige parent-keten (voor debugging)
-          const parentChain = [];
-          let el = normaalSpan;
-          for (let i = 0; i < 6 && el; i++) {
-            parentChain.push({
-              tag: el.tagName,
-              class: el.className?.toString?.()?.substring(0, 100) || '',
-              id: el.id || '',
-              role: el.getAttribute?.('role') || '',
-              onclick: el.getAttribute?.('onclick')?.substring(0, 100) || '',
-              href: el.getAttribute?.('href')?.substring(0, 100) || '',
-              html: el.outerHTML?.substring(0, 300) || ''
-            });
-            el = el.parentElement;
-          }
-
-          // Probeer elk niveau in de parent-keten te klikken (van span omhoog)
-          // Stop bij het eerste niveau dat een onclick, href, role, of event listener heeft
-          const clickResults = [];
-          el = normaalSpan;
-          for (let i = 0; i < 5 && el; i++) {
-            const tag = el.tagName;
-            const hasOnclick = !!el.getAttribute?.('onclick');
-            const hasHref = !!el.getAttribute?.('href');
-            const hasRole = !!el.getAttribute?.('role');
-            const isClickable = tag === 'A' || tag === 'BUTTON' || tag === 'LABEL' || hasOnclick || hasHref || hasRole;
-
-            if (isClickable || i >= 1) {
-              // Klik dit niveau
-              el.click();
-              clickResults.push(`clicked <${tag}> (level ${i})`);
-              // Probeer ook dispatchEvent voor Angular
-              try {
-                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-              } catch(e) {}
-            }
-
-            el = el.parentElement;
-          }
-
-          return { found: true, parentChain, clickResults };
-        });
-
-        if (clicked.found) {
-          radioSelected = true;
-          console.log(`[Warranty] "Normaal" gevonden! Parent-keten:`);
-          clicked.parentChain.forEach((p, i) => {
-            console.log(`[Warranty]   Level ${i}: <${p.tag}> class="${p.class}" id="${p.id}" role="${p.role}" onclick="${p.onclick}" href="${p.href}"`);
-            console.log(`[Warranty]   HTML: ${p.html}`);
-          });
-          console.log(`[Warranty] Klik-acties: ${clicked.clickResults.join(', ')}`);
-        } else {
-          console.log('[Warranty] Geen element met tekst "Normaal" gevonden op de pagina');
         }
-      }
 
-      // ── Methode 3: Standaard input[type="radio"] (voor niet-Angular formulieren) ──
-      if (!radioSelected) {
-        const plainRadio = formPage.locator('input[type="radio"]').first();
-        if (await plainRadio.count() > 0) {
-          await plainRadio.check({ force: true });
-          radioSelected = true;
-          console.log('[Warranty] Eerste input[type="radio"] geselecteerd (plain fallback)');
-        }
-      }
+        // Laatste fallback: zoek alle mat-slide-toggles en neem de eerste die niet gecheckt is
+        const allToggles = document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle');
+        const toggleInfo = Array.from(allToggles).map((t, i) => ({
+          index: i,
+          id: t.id,
+          checked: t.classList.contains('mat-checked'),
+          text: t.closest('div')?.textContent?.trim()?.substring(0, 80) || ''
+        }));
 
-      // ── Methode 4: Zoek role="radio" (WAI-ARIA radios) ──
-      if (!radioSelected) {
-        const ariaRadio = formPage.locator('[role="radio"]').first();
-        if (await ariaRadio.count() > 0) {
-          await ariaRadio.click();
-          radioSelected = true;
-          console.log('[Warranty] ARIA role="radio" geselecteerd');
-        }
-      }
+        return { found: false, allToggles: toggleInfo };
+      });
 
-      if (!radioSelected) {
-        console.log('[Warranty] Geen radio-veld gevonden (niet nodig voor dit voertuig)');
+      if (toggleResult.found) {
+        gebruiksToggled = true;
+        console.log(`[Warranty] Gebruiksvoorwaarden toggle geklikt (${toggleResult.clicked}, was checked: ${toggleResult.wasChecked})`);
+      } else {
+        console.log(`[Warranty] Geen Gebruiksvoorwaarden toggle gevonden. Alle toggles: ${JSON.stringify(toggleResult.allToggles)}`);
       }
     } catch (e) {
-      console.log(`[Warranty] Gebruiksvoorwaarden radio fout: ${e.message.substring(0, 200)}`);
+      console.log(`[Warranty] Gebruiksvoorwaarden toggle fout: ${e.message.substring(0, 200)}`);
     }
 
-    // Wacht tot velden enabled worden na radiokeuze
-    if (radioSelected) {
+    // Wacht tot velden enabled worden na toggle
+    if (gebruiksToggled) {
       await formPage.waitForTimeout(2000);
-      console.log('[Warranty] Gewacht 2s op velden na radiokeuze');
-      // Verifieer dat de radio echt geselecteerd is
-      const radioVerify = await formPage.evaluate(() => {
-        const checked = document.querySelector('input[type="radio"]:checked');
-        const matChecked = document.querySelector('.mat-radio-checked, mat-radio-button.mat-radio-checked');
-        return { plainChecked: !!checked, matChecked: !!matChecked };
+
+      // Verifieer toggle status
+      const toggleVerify = await formPage.evaluate(() => {
+        const toggles = document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle');
+        return Array.from(toggles).map(t => ({
+          id: t.id,
+          checked: t.classList.contains('mat-checked'),
+          text: t.textContent?.trim()?.substring(0, 50)
+        }));
       });
-      console.log(`[Warranty] Radio verificatie: plainChecked=${radioVerify.plainChecked}, matChecked=${radioVerify.matChecked}`);
+      console.log(`[Warranty] Toggle verificatie na wacht: ${JSON.stringify(toggleVerify)}`);
+
+      // Check of er nu enabled input velden zijn
+      const enabledInputs = await formPage.evaluate(() => {
+        const inputs = document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"])');
+        return Array.from(inputs).map(i => ({
+          name: i.name, id: i.id, type: i.type, disabled: i.disabled, readOnly: i.readOnly, visible: i.offsetParent !== null
+        }));
+      });
+      console.log(`[Warranty] Input velden na toggle: ${JSON.stringify(enabledInputs)}`);
     }
 
     // ══════════════════════════════════════════════════════════════
