@@ -1750,76 +1750,156 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       }
     }
 
-    // Vul kilometerstand in — zoek breed naar input velden
-    const allInputs = await formPage.$$('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])');
-    console.log(`[Warranty] ${allInputs.length} invulbare velden gevonden`);
+    // ══════════════════════════════════════════════════════════════
+    // STAP 6: Gebruiksvoorwaarden radio selecteren (MOET EERST)
+    // Bij voertuigen met "Operatie lijn"-tabel zijn km/email velden
+    // disabled totdat Normaal of Verzwaard is gekozen.
+    // ══════════════════════════════════════════════════════════════
+    console.log('[Warranty] STAP 6: Checken op Gebruiksvoorwaarden radio...');
+    let radioSelected = false;
+    try {
+      // Methode 1: zoek in de "Operatie lijn" / "Gebruiksvoorwaarden" tabel-rij
+      const tableRow = formPage.locator('table:has-text("Gebruiksvoorwaarden") tr:has(input[type="radio"])').first();
+      if (await tableRow.count() > 0) {
+        const rowRadio = tableRow.locator('input[type="radio"]').first();
+        if (await rowRadio.count() > 0) {
+          await rowRadio.check({ force: true });
+          radioSelected = true;
+          console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd (tabel-rij)');
+        }
+      }
 
+      // Methode 2: zoek op value "Normaal"
+      if (!radioSelected) {
+        const normaalRadio = formPage.locator(
+          'input[type="radio"][value*="ormaal" i], label:has-text("Normaal") input[type="radio"]'
+        ).first();
+        if (await normaalRadio.count() > 0) {
+          await normaalRadio.check({ force: true });
+          radioSelected = true;
+          console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd (value match)');
+        }
+      }
+
+      // Methode 3: klik op label "Normaal"
+      if (!radioSelected) {
+        const normaalLabel = formPage.locator('label', { hasText: /^\s*Normaal\s*$/i }).first();
+        if (await normaalLabel.count() > 0) {
+          await normaalLabel.click();
+          radioSelected = true;
+          console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd via label-klik');
+        }
+      }
+
+      // Methode 4: eerste radio op de pagina (als er überhaupt radios zijn)
+      if (!radioSelected) {
+        const anyRadio = formPage.locator('input[type="radio"]').first();
+        if (await anyRadio.count() > 0) {
+          await anyRadio.check({ force: true });
+          radioSelected = true;
+          console.log('[Warranty] Eerste radio-optie geselecteerd (fallback)');
+        }
+      }
+
+      if (!radioSelected) {
+        console.log('[Warranty] Geen radio-veld gevonden (niet nodig voor dit voertuig)');
+      }
+    } catch (e) {
+      console.log(`[Warranty] Gebruiksvoorwaarden radio fout: ${e.message.substring(0, 150)}`);
+    }
+
+    // Wacht tot velden enabled worden na radiokeuze
+    if (radioSelected) {
+      await formPage.waitForTimeout(1500);
+      console.log('[Warranty] Gewacht op velden na radiokeuze');
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // STAP 7: Kilometerstand + e-mailadres invullen
+    // Eerst proberen met specifieke selectors, dan fallback op labels
+    // ══════════════════════════════════════════════════════════════
+    console.log('[Warranty] STAP 7: km + email invullen...');
     let kmFilled = false;
     let emailFilled = false;
 
-    // Strategie 1: zoek op label/parent tekst
-    for (const input of allInputs) {
-      const fieldInfo = await input.evaluate(el => {
-        // Zoek label via for-attribuut
-        const id = el.id;
-        const label = id ? document.querySelector(`label[for="${id}"]`) : null;
-        const labelText = label ? label.textContent?.trim() : '';
-
-        // Zoek label via parent elementen
-        const parent = el.closest('div, tr, td, fieldset, .form-group, .field');
-        const parentText = parent ? parent.textContent?.trim()?.substring(0, 300) : '';
-
-        // Placeholder
-        const placeholder = el.placeholder || '';
-
-        return {
-          id: el.id,
-          name: el.name,
-          type: el.type,
-          value: el.value,
-          placeholder,
-          labelText,
-          parentText: parentText.substring(0, 200),
-          ariaLabel: el.getAttribute('aria-label') || ''
-        };
-      });
-
-      const searchText = (fieldInfo.labelText + ' ' + fieldInfo.parentText + ' ' + fieldInfo.placeholder + ' ' + fieldInfo.ariaLabel + ' ' + fieldInfo.name + ' ' + fieldInfo.id).toLowerCase();
-      console.log(`[Warranty]   Veld: id=${fieldInfo.id}, name=${fieldInfo.name}, type=${fieldInfo.type}, label="${fieldInfo.labelText}", placeholder="${fieldInfo.placeholder}"`);
-
-      if (!kmFilled && (searchText.includes('kilometer') || searchText.includes('km') || searchText.includes('mileage') || searchText.includes('odometer'))) {
-        await input.fill(String(kmStand));
+    // Specifieke selectors (name/id patronen die Servicebox gebruikt)
+    try {
+      const kmField = formPage.locator('input[name*="ilomet" i], input[id*="ilomet" i], input[name*="ileage" i], input[id*="km" i]').first();
+      if (await kmField.count() > 0) {
+        await kmField.fill(String(kmStand));
         kmFilled = true;
-        console.log(`[Warranty] Kilometerstand ingevuld: ${kmStand} (veld: ${fieldInfo.id || fieldInfo.name})`);
-      } else if (!emailFilled && (searchText.includes('mail') || searchText.includes('e-mail') || searchText.includes('email') || searchText.includes('courriel'))) {
-        await input.fill(customerEmail);
-        emailFilled = true;
-        console.log(`[Warranty] E-mailadres ingevuld (veld: ${fieldInfo.id || fieldInfo.name})`);
+        console.log(`[Warranty] Kilometerstand ingevuld via specifieke selector: ${kmStand}`);
       }
-    }
+    } catch (e) { console.log(`[Warranty] km specifieke selector fout: ${e.message.substring(0, 80)}`); }
 
-    // Strategie 2: als niet gevonden via labels, vul lege velden in volgorde
+    try {
+      const emailField = formPage.locator('input[type="email"], input[name*="mail" i], input[id*="mail" i]').first();
+      if (await emailField.count() > 0) {
+        await emailField.fill(customerEmail);
+        emailFilled = true;
+        console.log('[Warranty] E-mailadres ingevuld via specifieke selector');
+      }
+    } catch (e) { console.log(`[Warranty] email specifieke selector fout: ${e.message.substring(0, 80)}`); }
+
+    // Fallback: zoek op label/parent tekst
     if (!kmFilled || !emailFilled) {
-      console.log('[Warranty] Velden niet gevonden via labels, probeer op volgorde...');
-      const emptyInputs = [];
+      const allInputs = await formPage.$$('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])');
+      console.log(`[Warranty] Fallback: ${allInputs.length} invulbare velden gevonden`);
+
       for (const input of allInputs) {
-        const val = await input.inputValue().catch(() => '');
-        const isVisible = await input.isVisible().catch(() => false);
-        if ((!val || val.trim() === '') && isVisible) {
-          emptyInputs.push(input);
+        const fieldInfo = await input.evaluate(el => {
+          const id = el.id;
+          const label = id ? document.querySelector(`label[for="${id}"]`) : null;
+          const labelText = label ? label.textContent?.trim() : '';
+          const parent = el.closest('div, tr, td, fieldset, .form-group, .field');
+          const parentText = parent ? parent.textContent?.trim()?.substring(0, 300) : '';
+          return {
+            id: el.id, name: el.name, type: el.type, value: el.value,
+            placeholder: el.placeholder || '', labelText,
+            parentText: parentText.substring(0, 200),
+            ariaLabel: el.getAttribute('aria-label') || '',
+            disabled: el.disabled, readOnly: el.readOnly
+          };
+        });
+
+        const searchText = (fieldInfo.labelText + ' ' + fieldInfo.parentText + ' ' + fieldInfo.placeholder + ' ' + fieldInfo.ariaLabel + ' ' + fieldInfo.name + ' ' + fieldInfo.id).toLowerCase();
+        console.log(`[Warranty]   Veld: id=${fieldInfo.id}, name=${fieldInfo.name}, type=${fieldInfo.type}, disabled=${fieldInfo.disabled}, label="${fieldInfo.labelText}", placeholder="${fieldInfo.placeholder}"`);
+
+        if (!kmFilled && (searchText.includes('kilometer') || searchText.includes('km') || searchText.includes('mileage') || searchText.includes('odometer'))) {
+          await input.fill(String(kmStand));
+          kmFilled = true;
+          console.log(`[Warranty] Kilometerstand ingevuld: ${kmStand} (veld: ${fieldInfo.id || fieldInfo.name})`);
+        } else if (!emailFilled && (searchText.includes('mail') || searchText.includes('e-mail') || searchText.includes('email') || searchText.includes('courriel'))) {
+          await input.fill(customerEmail);
+          emailFilled = true;
+          console.log(`[Warranty] E-mailadres ingevuld (veld: ${fieldInfo.id || fieldInfo.name})`);
         }
       }
-      console.log(`[Warranty] ${emptyInputs.length} lege zichtbare velden gevonden`);
 
-      if (!kmFilled && emptyInputs.length >= 1) {
-        await emptyInputs[0].fill(String(kmStand));
-        kmFilled = true;
-        console.log('[Warranty] Kilometerstand ingevuld in eerste lege veld');
-      }
-      if (!emailFilled && emptyInputs.length >= 2) {
-        await emptyInputs[1].fill(customerEmail);
-        emailFilled = true;
-        console.log('[Warranty] E-mailadres ingevuld in tweede lege veld');
+      // Laatste fallback: vul lege velden op volgorde
+      if (!kmFilled || !emailFilled) {
+        console.log('[Warranty] Velden niet gevonden via labels, probeer op volgorde...');
+        const emptyInputs = [];
+        for (const input of allInputs) {
+          const val = await input.inputValue().catch(() => '');
+          const isVisible = await input.isVisible().catch(() => false);
+          const isDisabled = await input.evaluate(el => el.disabled).catch(() => true);
+          if ((!val || val.trim() === '') && isVisible && !isDisabled) {
+            emptyInputs.push(input);
+          }
+        }
+        console.log(`[Warranty] ${emptyInputs.length} lege zichtbare enabled velden gevonden`);
+
+        if (!kmFilled && emptyInputs.length >= 1) {
+          await emptyInputs[0].fill(String(kmStand));
+          kmFilled = true;
+          console.log('[Warranty] Kilometerstand ingevuld in eerste lege veld');
+        }
+        if (!emailFilled && emptyInputs.length >= 2) {
+          await emptyInputs[1].fill(customerEmail);
+          emailFilled = true;
+          console.log('[Warranty] E-mailadres ingevuld in tweede lege veld');
+        }
       }
     }
 
@@ -1830,12 +1910,10 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       return { status: 'error', vin, message: `Kon formulier niet volledig invullen (km: ${kmFilled}, email: ${emailFilled})`, vehicle: vehicleData };
     }
 
-    // STAP 7: Toggles/checkboxes aanvinken
-    // Het formulier gebruikt Angular Material mat-slide-toggle componenten
-    // Deze hebben een verborgen <input type="checkbox"> met een <div class="mat-slide-toggle-thumb"> overlay
-    // We moeten de parent mat-slide-toggle klikken, niet de input zelf
-
-    // Methode 1: klik op mat-slide-toggle elementen
+    // ══════════════════════════════════════════════════════════════
+    // STAP 8: Toggles/checkboxes aanvinken
+    // ══════════════════════════════════════════════════════════════
+    console.log('[Warranty] STAP 8: Toggles/checkboxes...');
     const slideToggles = await warrantyPage.$$('mat-slide-toggle, .mat-slide-toggle');
     console.log(`[Warranty] ${slideToggles.length} slide toggles gevonden`);
 
@@ -1843,14 +1921,9 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       for (const toggle of slideToggles) {
         const isChecked = await toggle.evaluate(el => el.classList.contains('mat-checked'));
         if (!isChecked) {
-          // Klik op het label of de toggle container
           await toggle.evaluate(el => {
             const label = el.querySelector('.mat-slide-toggle-label, label');
-            if (label) {
-              label.click();
-            } else {
-              el.click();
-            }
+            if (label) { label.click(); } else { el.click(); }
           });
           await warrantyPage.waitForTimeout(300);
           console.log('[Warranty] Slide toggle aangezet');
@@ -1859,21 +1932,15 @@ async function activateWarranty(vin, kmStand, customerEmail) {
         }
       }
     } else {
-      // Fallback: probeer gewone checkboxes
       const checkboxes = await warrantyPage.$$('input[type="checkbox"]');
       console.log(`[Warranty] ${checkboxes.length} gewone checkboxes gevonden`);
       for (const cb of checkboxes) {
         const isChecked = await cb.isChecked();
         if (!isChecked) {
-          // Klik op parent label in plaats van de input zelf
           const clicked = await cb.evaluate(el => {
             const label = el.closest('label') || el.parentElement;
-            if (label && label !== el) {
-              label.click();
-              return 'label';
-            }
-            el.click();
-            return 'direct';
+            if (label && label !== el) { label.click(); return 'label'; }
+            el.click(); return 'direct';
           });
           console.log(`[Warranty] Checkbox aangevinkt via ${clicked}`);
           await warrantyPage.waitForTimeout(300);
@@ -1881,39 +1948,18 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       }
     }
 
-    // STAP 8: Gebruiksvoorwaarden radio selecteren (indien aanwezig)
-    // Dit veld verschijnt bij voertuigen met interval 15.000 km / 1 jaar
-    console.log('[Warranty] Checken op Gebruiksvoorwaarden radio...');
-    try {
-      const normaalRadio = warrantyPage.locator(
-        'input[type="radio"][value*="ormaal" i], label:has-text("Normaal") input[type="radio"]'
-      ).first();
-      if (await normaalRadio.count() > 0) {
-        await normaalRadio.check({ force: true });
-        console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd');
-        await warrantyPage.waitForTimeout(500);
-      } else {
-        // Fallback: label aanklikken (Servicebox styled radios)
-        const normaalLabel = warrantyPage.locator('label', { hasText: /^\s*Normaal\s*$/i }).first();
-        if (await normaalLabel.count() > 0) {
-          await normaalLabel.click();
-          console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd via label');
-          await warrantyPage.waitForTimeout(500);
-        } else {
-          console.log('[Warranty] Geen Gebruiksvoorwaarden veld gevonden (niet nodig voor dit voertuig)');
-        }
-      }
-    } catch (e) {
-      console.log(`[Warranty] Gebruiksvoorwaarden check overgeslagen: ${e.message.substring(0, 100)}`);
-    }
+    // ══════════════════════════════════════════════════════════════
+    // STAP 8b: Verificatie vóór submit
+    // ══════════════════════════════════════════════════════════════
+    const verifyKm = await formPage.locator('input[name*="ilomet" i], input[id*="ilomet" i]').first().inputValue().catch(() => '');
+    const verifyRadio = await formPage.locator('input[type="radio"]:checked').count().catch(() => 0);
+    console.log(`[Warranty] Pre-submit verificatie: km="${verifyKm}", radio_checked=${verifyRadio}`);
 
-    // Extra veiligheid: check of er nog lege verplichte velden openstaan
     const missingRequired = await warrantyPage.evaluate(() => {
       const required = document.querySelectorAll('input[required], select[required]');
       const empty = [];
       for (const el of required) {
         if (el.type === 'radio') {
-          // Check of er in dezelfde name-groep een gecheckte radio is
           const name = el.name;
           if (name && !document.querySelector(`input[type="radio"][name="${name}"]:checked`)) {
             empty.push(`radio:${name}`);
@@ -1922,11 +1968,10 @@ async function activateWarranty(vin, kmStand, customerEmail) {
           empty.push(`${el.type || 'input'}:${el.name || el.id || '?'}`);
         }
       }
-      // Dedup
       return [...new Set(empty)];
     });
     if (missingRequired.length > 0) {
-      console.log(`[Warranty] Let op: ${missingRequired.length} verplichte velden nog leeg: ${missingRequired.join(', ')}`);
+      console.log(`[Warranty] WAARSCHUWING: ${missingRequired.length} verplichte velden nog leeg: ${missingRequired.join(', ')}`);
     }
 
     // STAP 9: Klik "Indienen"
