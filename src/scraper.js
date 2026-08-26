@@ -1881,7 +1881,55 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       }
     }
 
-    // STAP 8: Klik "Indienen"
+    // STAP 8: Gebruiksvoorwaarden radio selecteren (indien aanwezig)
+    // Dit veld verschijnt bij voertuigen met interval 15.000 km / 1 jaar
+    console.log('[Warranty] Checken op Gebruiksvoorwaarden radio...');
+    try {
+      const normaalRadio = warrantyPage.locator(
+        'input[type="radio"][value*="ormaal" i], label:has-text("Normaal") input[type="radio"]'
+      ).first();
+      if (await normaalRadio.count() > 0) {
+        await normaalRadio.check({ force: true });
+        console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd');
+        await warrantyPage.waitForTimeout(500);
+      } else {
+        // Fallback: label aanklikken (Servicebox styled radios)
+        const normaalLabel = warrantyPage.locator('label', { hasText: /^\s*Normaal\s*$/i }).first();
+        if (await normaalLabel.count() > 0) {
+          await normaalLabel.click();
+          console.log('[Warranty] Gebruiksvoorwaarden: "Normaal" geselecteerd via label');
+          await warrantyPage.waitForTimeout(500);
+        } else {
+          console.log('[Warranty] Geen Gebruiksvoorwaarden veld gevonden (niet nodig voor dit voertuig)');
+        }
+      }
+    } catch (e) {
+      console.log(`[Warranty] Gebruiksvoorwaarden check overgeslagen: ${e.message.substring(0, 100)}`);
+    }
+
+    // Extra veiligheid: check of er nog lege verplichte velden openstaan
+    const missingRequired = await warrantyPage.evaluate(() => {
+      const required = document.querySelectorAll('input[required], select[required]');
+      const empty = [];
+      for (const el of required) {
+        if (el.type === 'radio') {
+          // Check of er in dezelfde name-groep een gecheckte radio is
+          const name = el.name;
+          if (name && !document.querySelector(`input[type="radio"][name="${name}"]:checked`)) {
+            empty.push(`radio:${name}`);
+          }
+        } else if (!el.value) {
+          empty.push(`${el.type || 'input'}:${el.name || el.id || '?'}`);
+        }
+      }
+      // Dedup
+      return [...new Set(empty)];
+    });
+    if (missingRequired.length > 0) {
+      console.log(`[Warranty] Let op: ${missingRequired.length} verplichte velden nog leeg: ${missingRequired.join(', ')}`);
+    }
+
+    // STAP 9: Klik "Indienen"
     console.log('[Warranty] Klikken op Indienen...');
     const submitBtn = await warrantyPage.$('button:has-text("Indienen"), input[value*="Indienen"], button:has-text("Submit"), input[type="submit"]');
     if (!submitBtn) {
@@ -1894,11 +1942,22 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     await warrantyPage.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
     await warrantyPage.waitForTimeout(3000);
 
-    // Check resultaat
+    // Check resultaat — alleen `activated` bij echte contractbevestiging
     const resultText = await warrantyPage.evaluate(() => document.body?.innerText || '');
-    console.log(`[Warranty] Resultaat pagina: ${resultText.substring(0, 300)}`);
+    console.log(`[Warranty] Resultaat pagina: ${resultText.substring(0, 500)}`);
 
-    if (resultText.includes('contract') || resultText.includes('bevestig') || resultText.includes('success') || resultText.includes('ingediend')) {
+    // Contract-ID extraheren als beschikbaar
+    let contractId = null;
+    const contractMatch = resultText.match(/contract aangemaakt met ID[:\s]*([A-Z0-9\-]+)/i)
+      || resultText.match(/contract[:\s]+ID[:\s]*([A-Z0-9\-]+)/i)
+      || resultText.match(/contract(?:\s+is)?\s+(?:aangemaakt|created)[^]*?(?:ID|nummer)[:\s]*([A-Z0-9\-]+)/i);
+    if (contractMatch) {
+      contractId = contractMatch[1];
+      console.log(`[Warranty] Contract ID: ${contractId}`);
+    }
+
+    // 1. Succes: contract echt aangemaakt
+    if (/contract aangemaakt met ID|contract has been created|contract is aangemaakt/i.test(resultText)) {
       console.log(`[Warranty] 2+6 activatie GELUKT voor ${vin}`);
       await browser.close();
       return {
@@ -1907,20 +1966,50 @@ async function activateWarranty(vin, kmStand, customerEmail) {
         message: '2+6 garantie succesvol geactiveerd',
         vehicle: vehicleData,
         km_stand: kmStand,
+        contract_id: contractId,
         result_text: resultText.substring(0, 500)
       };
-    } else {
-      console.log(`[Warranty] Onverwacht resultaat na indienen`);
-      await warrantyPage.screenshot({ path: `warranty-result-debug-${Date.now()}.png` });
+    }
+
+    // 2. Al eerder geactiveerd
+    if (/al geactiveerd|already activated|bestaat al|reeds ingediend|already submitted/i.test(resultText)) {
+      console.log(`[Warranty] Was al geactiveerd voor ${vin}`);
+      await browser.close();
+      return {
+        status: 'already_activated',
+        vin,
+        message: 'Garantie was al geactiveerd',
+        vehicle: vehicleData,
+        contract_id: contractId,
+        result_text: resultText.substring(0, 500)
+      };
+    }
+
+    // 3. Formulier nog zichtbaar → niet ingediend (bijv. Gebruiksvoorwaarden niet gevuld)
+    if (/Gebruiksvoorwaarden/i.test(resultText) || /Formulier indienen/i.test(resultText)) {
+      console.log(`[Warranty] Formulier niet ingediend — verplicht veld niet gevuld`);
+      await warrantyPage.screenshot({ path: `warranty-form-stuck-${Date.now()}.png` });
       await browser.close();
       return {
         status: 'error',
         vin,
-        message: 'Formulier ingediend maar bevestiging niet herkend — controleer handmatig',
+        message: 'Formulier niet ingediend (verplicht veld Gebruiksvoorwaarden niet gevuld)',
         vehicle: vehicleData,
         result_text: resultText.substring(0, 500)
       };
     }
+
+    // 4. Onbekend resultaat → nooit als succes doorgeven
+    console.log(`[Warranty] Geen bevestiging van contract aangemaakt gevonden`);
+    await warrantyPage.screenshot({ path: `warranty-result-debug-${Date.now()}.png` });
+    await browser.close();
+    return {
+      status: 'error',
+      vin,
+      message: 'Geen bevestiging van contract aangemaakt gevonden',
+      vehicle: vehicleData,
+      result_text: resultText.substring(0, 500)
+    };
 
   } catch (error) {
     console.error(`[Warranty] Error: ${error.message}`);
