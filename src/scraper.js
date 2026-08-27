@@ -15,6 +15,46 @@ const SERVICEBOX_URL = process.env.SERVICEBOX_URL || 'https://servicebox.mpsa.co
 const USERNAME = process.env.SERVICEBOX_USERNAME;
 const PASSWORD = process.env.SERVICEBOX_PASSWORD;
 
+/**
+ * Vertaal Playwright / technische fouten naar korte NL-meldingen.
+ * De ruwe fout blijft in de console.log; alleen de schone melding gaat naar de klant.
+ */
+function sanitizeErrorMessage(rawMessage) {
+  const msg = rawMessage || 'Onbekende fout';
+
+  // Bewaar al schone eigen meldingen (beginnen niet met page.evaluate/frame/Timeout/etc.)
+  if (/^(Login|Zoek|Kon geen|Indienen|Formulier|Onderhoudsschema|Garantie)/i.test(msg)) {
+    return msg;
+  }
+
+  // Playwright-specifieke patronen → NL melding
+  if (/page\.evaluate|frame\.evaluate|execution context/i.test(msg)) {
+    return 'Pagina wisselde tijdens uitlezen — nieuwe poging aanbevolen';
+  }
+  if (/timeout|Timeout/i.test(msg)) {
+    return 'Pagina reageerde niet op tijd — nieuwe poging aanbevolen';
+  }
+  if (/navigation|navigating/i.test(msg)) {
+    return 'Pagina navigatie onderbroken — nieuwe poging aanbevolen';
+  }
+  if (/detached|disposed/i.test(msg)) {
+    return 'Pagina-element verdwenen tijdens uitlezen — nieuwe poging aanbevolen';
+  }
+  if (/net::|ERR_/i.test(msg)) {
+    return 'Netwerkfout bij laden van Servicebox — nieuwe poging aanbevolen';
+  }
+  if (/browser.*closed|target.*closed/i.test(msg)) {
+    return 'Browser sessie onverwacht gesloten — nieuwe poging aanbevolen';
+  }
+  if (/protocol error/i.test(msg)) {
+    return 'Communicatiefout met browser — nieuwe poging aanbevolen';
+  }
+
+  // Fallback: kort de melding in (max 120 chars, geen stacktrace)
+  const firstLine = msg.split('\n')[0].substring(0, 120);
+  return firstLine;
+}
+
 async function scrapeServicebox(kenteken, kmStand) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '0');
@@ -59,11 +99,13 @@ async function scrapeServicebox(kenteken, kmStand) {
 
   } catch (error) {
     console.error('[Scraper] Error:', error.message);
+    console.error('[Scraper] Stack:', error.stack?.substring(0, 500));
     try {
       await page.screenshot({ path: `error-${Date.now()}.png` });
       console.log('[Scraper] Error screenshot opgeslagen');
     } catch (e) { /* ignore */ }
-    throw error;
+    // Geef gebruiksvriendelijke NL-melding, niet de ruwe Playwright stacktrace
+    throw new Error(sanitizeErrorMessage(error.message));
   } finally {
     await browser.close();
   }
@@ -518,7 +560,9 @@ async function extractMaintenance(page, context, kmStand) {
       executed = true;
     } catch (e) {
       console.log(`[Maintenance] /mp/ direct openen mislukt: ${e.message.substring(0, 100)}`);
-      return { intervals: [], prices: [], interval_pricing: [], service_frequency: null };
+      console.log('[Maintenance] Menu pricing niet beschikbaar — probeer ESA route...');
+      const esaResult = await extractFromESA(page, context);
+      return { intervals: [], prices: [], interval_pricing: [], service_frequency: esaResult };
     }
   }
 
@@ -550,8 +594,9 @@ async function extractMaintenance(page, context, kmStand) {
   }
 
   if (!menuPricingPage) {
-    console.log('[Maintenance] Geen Menu pricing pagina gevonden in open vensters');
-    return { intervals: [], prices: [], interval_pricing: [], service_frequency: null };
+    console.log('[Maintenance] Geen Menu pricing pagina gevonden — probeer ESA route...');
+    const esaResult = await extractFromESA(page, context);
+    return { intervals: [], prices: [], interval_pricing: [], service_frequency: esaResult };
   }
 
   console.log(`[Maintenance] Menu pricing gevonden: ${menuPricingPage.url()}`);
@@ -670,29 +715,245 @@ async function extractMaintenance(page, context, kmStand) {
   // Sluit popup
   await menuPricingPage.close();
 
+  // Als geen frequentie via Menu pricing, probeer ESA als fallback
+  if (!serviceFrequency) {
+    console.log('[Maintenance] Geen frequentie via Menu pricing — probeer ESA route...');
+    serviceFrequency = await extractFromESA(page, context);
+  }
+
   return { intervals, interval_pricing, prices, service_frequency: serviceFrequency };
+}
+
+// =========================================
+// ESA FALLBACK — voor voertuigen zonder Menu pricing (bijv. oudere Opels)
+// =========================================
+/**
+ * Open ESA binnen Servicebox, ga naar Details tab → Voorspelling blok.
+ * Parse rij "Onderhoudsbeurt (1 Jaren | 30000 km)" → { km: 30000, months: 12 }
+ *
+ * ESA link staat onderaan de Servicebox voertuigpagina (naast Menu pricing).
+ * Navigatie: klik ESA link → ESA opent in popup/frame → Details tab → Voorspelling
+ */
+async function extractFromESA(page, context) {
+  console.log('[ESA] Probeer frequentie via ESA route...');
+
+  try {
+    // Zoek en klik ESA link in de Servicebox pagina
+    let esaClicked = false;
+
+    // Methode 1: goTo('/esa/') via JS functie
+    for (const frame of page.frames()) {
+      try {
+        const hasGoTo = await frame.evaluate(() => typeof goTo === 'function');
+        if (hasGoTo) {
+          console.log(`[ESA] goTo('/esa/') uitvoeren in frame: ${frame.url().substring(0, 80)}`);
+          await frame.evaluate(() => goTo('/esa/'));
+          esaClicked = true;
+          break;
+        }
+      } catch (e) { continue; }
+    }
+
+    // Methode 2: Zoek ESA link direct
+    if (!esaClicked) {
+      for (const frame of page.frames()) {
+        try {
+          const esaLink = await frame.$('a:has-text("ESA"), a[href*="/esa/"], a[href*="esa"]');
+          if (esaLink) {
+            const text = (await esaLink.textContent()).trim();
+            if (/^ESA$/i.test(text) || text.includes('ESA')) {
+              console.log(`[ESA] ESA link gevonden: "${text}"`);
+              await esaLink.click();
+              esaClicked = true;
+              break;
+            }
+          }
+        } catch (e) { continue; }
+      }
+    }
+
+    if (!esaClicked) {
+      console.log('[ESA] Geen ESA link gevonden in Servicebox');
+      return null;
+    }
+
+    await page.waitForTimeout(5000);
+
+    // Zoek de ESA pagina in alle open pages
+    const allPages = context.pages();
+    console.log(`[ESA] Pages na ESA klik: ${allPages.map(p => p.url().substring(0, 80)).join(', ')}`);
+
+    let esaPage = null;
+    for (const p of allPages) {
+      const url = p.url().toLowerCase();
+      if (url.includes('esa') && !url.includes('about:blank')) {
+        esaPage = p;
+        break;
+      }
+    }
+
+    // Fallback: nieuwste pagina die niet de hoofdpagina is
+    if (!esaPage) {
+      for (const p of allPages) {
+        if (p !== page && p.url() !== 'about:blank') {
+          esaPage = p;
+        }
+      }
+    }
+
+    if (!esaPage) {
+      console.log('[ESA] Geen ESA pagina gevonden');
+      return null;
+    }
+
+    console.log(`[ESA] ESA pagina: ${esaPage.url().substring(0, 100)}`);
+    await esaPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    await esaPage.waitForTimeout(3000);
+
+    // Zoek en klik "Details" tab
+    let detailsClicked = false;
+    const detailsSelectors = [
+      'a:has-text("Details")', 'button:has-text("Details")',
+      'span:has-text("Details")', '[role="tab"]:has-text("Details")',
+      'li:has-text("Details") a', '.nav-link:has-text("Details")',
+      'mat-tab-header :has-text("Details")'
+    ];
+
+    // Check ook frames binnen ESA pagina
+    const esaFrames = esaPage.frames();
+    for (const frame of esaFrames) {
+      if (detailsClicked) break;
+      for (const sel of detailsSelectors) {
+        try {
+          const detailsTab = await frame.$(sel);
+          if (detailsTab) {
+            const txt = (await detailsTab.textContent()).trim();
+            console.log(`[ESA] Details tab gevonden: "${txt}"`);
+            await detailsTab.click();
+            detailsClicked = true;
+            await esaPage.waitForTimeout(3000);
+            break;
+          }
+        } catch (e) { continue; }
+      }
+    }
+
+    if (!detailsClicked) {
+      console.log('[ESA] Details tab niet gevonden, probeer direct op pagina...');
+    }
+
+    // Zoek "Voorspelling" blok en parse "Onderhoudsbeurt (1 Jaren | 30000 km)"
+    const esaFreq = await (async () => {
+      for (const frame of esaPage.frames()) {
+        try {
+          const result = await frame.evaluate(() => {
+            const bodyText = document.body?.innerText || '';
+            if (bodyText.trim().length < 20) return { error: 'empty' };
+
+            // Zoek "Onderhoudsbeurt (X Jaren | YYYYY km)" patroon
+            // Varianten: "Onderhoudsbeurt (1 Jaren | 30000 km)"
+            //            "Onderhoudsbeurt (2 Jaren | 40000 km)"
+            const patterns = [
+              /[Oo]nderhoudsbeurt\s*\(\s*(\d+)\s*[Jj]a(?:ren|ar)\s*\|\s*(\d[\d.\s]*)\s*km\s*\)/gi,
+              /[Mm]aintenance\s*\(\s*(\d+)\s*[Yy]ear[s]?\s*\|\s*(\d[\d.\s]*)\s*km\s*\)/gi,
+              /[Ee]ntretien\s*\(\s*(\d+)\s*[Aa]n[s]?\s*\|\s*(\d[\d.\s]*)\s*km\s*\)/gi,
+            ];
+
+            for (const pattern of patterns) {
+              const matches = [...bodyText.matchAll(pattern)];
+              if (matches.length > 0) {
+                const m = matches[0];
+                return { found: true, years: m[1], km: m[2], full: m[0] };
+              }
+            }
+
+            // Breder: zoek "Voorspelling" sectie en lees km/jaren waarden
+            const voorspellingIdx = bodyText.toLowerCase().indexOf('voorspelling');
+            if (voorspellingIdx > -1) {
+              const section = bodyText.substring(voorspellingIdx, voorspellingIdx + 500);
+              return { error: 'no_pattern_in_voorspelling', text: section.substring(0, 300) };
+            }
+
+            return { error: 'no_voorspelling', text: bodyText.substring(0, 500) };
+          });
+
+          if (result && result.found) return result;
+          if (result && result.error && result.error !== 'empty') {
+            console.log(`[ESA] ${result.error}: ${(result.text || '').substring(0, 200)}`);
+          }
+        } catch (e) {
+          console.log(`[ESA] Frame error: ${e.message.substring(0, 80)}`);
+        }
+      }
+      return null;
+    })();
+
+    // Sluit ESA pagina
+    if (esaPage !== page) {
+      await esaPage.close().catch(() => {});
+    }
+
+    if (esaFreq && esaFreq.found) {
+      const km = parseInt(esaFreq.km.replace(/[.\s]/g, ''));
+      const years = parseInt(esaFreq.years);
+      const months = years * 12;
+      console.log(`[ESA] Frequentie gevonden: ${km} km / ${months} maanden (uit "${esaFreq.full}")`);
+      return {
+        km, months, condition: 'normaal',
+        km_heavy: null, months_heavy: null,
+        source: 'esa_voorspelling',
+        raw: esaFreq.full
+      };
+    }
+
+    console.log('[ESA] Geen frequentie gevonden via ESA');
+    return null;
+
+  } catch (e) {
+    console.log(`[ESA] Error: ${e.message.substring(0, 150)}`);
+    return null;
+  }
 }
 
 // =========================================
 // SERVICE FREQUENTIE (km + maanden)
 // =========================================
 /**
- * Extraheert de "Gebruikelijke frequentie" uit de Quotelink pagina.
- * Formaat op pagina: "Elk 25000 Km / 1 jaar" of "Elk 15000 Km / 1 jaar"
+ * Extraheert de onderhoudsfrequentie uit de Quotelink/Menu pricing tabel.
  *
- * De pagina toont twee kolommen:
- *   - "Normale gebruiksomstandigheden" → bijv. Elk 25000 Km / 1 jaar
- *   - "Zware gebruiksomstandigheden" → bijv. Elk 15000 Km / 1 jaar
+ * Tabelstructuur:
+ *   ONDERHOUD | Normale gebruiksomstandigheden | Zware gebruiksomstandigheden
+ *   ...       | Elk 25000 Km / 1 jaar          | Elk 15000 Km / 1 jaar
  *
- * Returns: { km: 25000, months: 12, km_heavy: 15000, months_heavy: 12, raw: "..." }
+ * Strategie:
+ * 1. Zoek de tabel met header "Normale gebruiksomstandigheden" (kolomindex dynamisch)
+ * 2. Zoek de rij met "systematische" onderhoud
+ * 3. Lees de cel op kruispunt kolom normaal + rij systematisch
+ * 4. Fallback: regex op hele pagina als geen tabel gevonden
+ *
+ * Returns: { km: 25000, months: 12, condition: "normaal", source: "servicebox_schema",
+ *            km_heavy: 15000, months_heavy: 12, raw: "..." }
  */
 async function extractServiceFrequency(page) {
   console.log('[Frequency] Extracting service frequentie...');
 
-  // Check ALLE frames (inclusief cross-origin via Playwright)
   const allFrames = page.frames();
   const framesToCheck = allFrames.length > 0 ? allFrames : [page.mainFrame()];
   console.log(`[Frequency] ${framesToCheck.length} frames te checken`);
+
+  // Helper: parse "Elk 25.000 Km / 1 jaar" → { km: 25000, months: 12 }
+  function parseFreqValue(text) {
+    if (!text) return null;
+    const kmMatch = text.match(/(\d[\d.\s]*)\s*km/i);
+    const periodMatch = text.match(/(\d+)\s*(jaar|jaren|maand|maanden|an[s]?|year[s]?|moi[s]?|month[s]?)/i);
+    if (!kmMatch || !periodMatch) return null;
+    const km = parseInt(kmMatch[1].replace(/[.\s]/g, ''));
+    const period = parseInt(periodMatch[1]);
+    const unit = periodMatch[2].toLowerCase();
+    const months = (unit.startsWith('jaar') || unit.startsWith('jaren') || unit.startsWith('year') || unit.startsWith('an')) ? period * 12 : period;
+    if (isNaN(km) || isNaN(months) || km < 1000) return null;
+    return { km, months };
+  }
 
   for (let fi = 0; fi < framesToCheck.length; fi++) {
     const frame = framesToCheck[fi];
@@ -700,69 +961,79 @@ async function extractServiceFrequency(page) {
       const frameUrl = frame.url();
       const freq = await frame.evaluate(() => {
         const bodyText = document.body?.innerText || '';
-
         if (bodyText.trim().length < 20) {
           return { error: 'empty_frame', text: bodyText.trim() };
         }
 
-        // Zoek het patroon — meerdere varianten:
-        // "Elk 25000 Km / 1 jaar"
-        // "Elke 30.000 km / 12 maanden"
-        // "Tous les 30000 Km / 1 an" (Frans)
-        // "Every 30000 Km / 1 year"
-        // Opel/Vauxhall varianten:
-        // "30 000 km of 12 maanden" / "30.000 km of 12 maanden"
-        // "30000 km / 12 months" / "30 000 km ou 12 mois"
+        // ── METHODE 1: Tabel met kolom "Normale gebruiksomstandigheden" ──
+        const tables = document.querySelectorAll('table');
+        for (const table of tables) {
+          const headerRow = table.querySelector('tr, thead tr');
+          if (!headerRow) continue;
+          const headerCells = headerRow.querySelectorAll('th, td');
+          let normaalIdx = -1;
+          let zwaarIdx = -1;
+
+          for (let i = 0; i < headerCells.length; i++) {
+            const ht = (headerCells[i].textContent || '').trim().toLowerCase();
+            if (/normale/i.test(ht)) normaalIdx = i;
+            if (/zware/i.test(ht)) zwaarIdx = i;
+          }
+
+          if (normaalIdx === -1) continue; // niet de juiste tabel
+
+          // Zoek rij met "systematische" onderhoud
+          const rows = table.querySelectorAll('tr');
+          let systematicRow = null;
+          const rowDebug = [];
+          for (const row of rows) {
+            const firstCell = (row.querySelector('td, th')?.textContent || '').trim();
+            rowDebug.push(firstCell.substring(0, 80));
+            if (/systemat/i.test(firstCell)) {
+              systematicRow = row;
+              break;
+            }
+          }
+
+          if (!systematicRow) {
+            return { error: 'no_systematic_row', normaalIdx, zwaarIdx,
+              rows: rowDebug, headerTexts: Array.from(headerCells).map(c => c.textContent?.trim()) };
+          }
+
+          const cells = systematicRow.querySelectorAll('td, th');
+          const normaalText = normaalIdx < cells.length ? (cells[normaalIdx].textContent || '').trim() : '';
+          const zwaarText = zwaarIdx >= 0 && zwaarIdx < cells.length ? (cells[zwaarIdx].textContent || '').trim() : '';
+
+          return { method: 'table', normaalText, zwaarText, normaalIdx, zwaarIdx };
+        }
+
+        // ── METHODE 2: Regex fallback (voor pagina's zonder tabel) ──
         const patterns = [
-          /Elk[e]?\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
-          /[Tt]ous\s+les\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
-          /[Ee]very\s+(\d[\d. ]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
-          // Opel-style: "30.000 km of 12 maanden" / "30 000 km ou 12 mois"
-          /(\d[\d. ]{3,})\s*[Kk][Mm]\s*(?:of|ou|or)\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
-          // Fallback: gewoon een getal gevolgd door km / getal gevolgd door jaar/maand
-          /(\d[\d. ]{3,})\s*[Kk][Mm]\s*\/\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
-          // "Gebruikelijke frequentie" sectie met los km-getal
-          /[Ff]req[a-z]*[.:]\s*(\d[\d. ]*)\s*[Kk][Mm]\s*[\/\-–]\s*(\d+)\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
-          // Nog breder: km-getal gevolgd door interval op zelfde of volgende regel
-          /(\d{2,3}[.\s]?000)\s*[Kk][Mm][\s\S]{0,20}?(\d{1,2})\s*(jaar|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi
+          /Elk[e]?\s+(\d[\d.\s]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|jaren|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
+          /[Tt]ous\s+les\s+(\d[\d.\s]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|jaren|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
+          /[Ee]very\s+(\d[\d.\s]*)\s*[Kk][Mm]?\s*\/\s*(\d+)\s*(jaar|jaren|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
+          /(\d[\d.\s]{3,})\s*[Kk][Mm]\s*(?:of|ou|or)\s*(\d+)\s*(jaar|jaren|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
+          /(\d[\d.\s]{3,})\s*[Kk][Mm]\s*\/\s*(\d+)\s*(jaar|jaren|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi,
+          /(\d{2,3}[.\s]?000)\s*[Kk][Mm][\s\S]{0,20}?(\d{1,2})\s*(jaar|jaren|maand(?:en)?|an[s]?|year[s]?|moi[s]?|month[s]?)/gi
         ];
 
-        let allMatches = [];
         for (const pattern of patterns) {
           const matches = [...bodyText.matchAll(pattern)];
           if (matches.length > 0) {
-            allMatches = matches;
-            break;
+            return { method: 'regex', matches: matches.map(m => ({ full: m[0], g1: m[1], g2: m[2], g3: m[3] })) };
           }
         }
 
-        if (allMatches.length === 0) {
-          // Geef de eerste 800 chars terug voor debugging
-          return { error: 'no_match', text: bodyText.substring(0, 800) };
-        }
-
-        const parseMatch = (m) => {
-          const km = parseInt(m[1].replace(/[. ]/g, ''));
-          const period = parseInt(m[2]);
-          const unit = m[3].toLowerCase();
-          const months = (unit.startsWith('jaar') || unit.startsWith('year') || unit.startsWith('an')) ? period * 12 : period;
-          return { km, months };
-        };
-
-        const normal = parseMatch(allMatches[0]);
-        const heavy = allMatches.length > 1 ? parseMatch(allMatches[1]) : null;
-
-        return {
-          km: normal.km,
-          months: normal.months,
-          km_heavy: heavy ? heavy.km : null,
-          months_heavy: heavy ? heavy.months : null,
-          raw: allMatches.map(m => m[0]).join(' | ')
-        };
+        return { error: 'no_match', text: bodyText.substring(0, 800) };
       });
 
       if (freq && freq.error === 'empty_frame') {
-        console.log(`[Frequency] Frame ${fi} (${frameUrl.substring(0, 80)}): leeg/te kort (${freq.text.length} chars)`);
+        console.log(`[Frequency] Frame ${fi} (${frameUrl.substring(0, 80)}): leeg`);
+        continue;
+      }
+
+      if (freq && freq.error === 'no_systematic_row') {
+        console.log(`[Frequency] Frame ${fi}: tabel gevonden (normaalIdx=${freq.normaalIdx}) maar geen systematische rij. Headers: ${JSON.stringify(freq.headerTexts)}. Rijen: ${freq.rows.join(' | ')}`);
         continue;
       }
 
@@ -771,13 +1042,45 @@ async function extractServiceFrequency(page) {
         continue;
       }
 
-      if (freq) {
-        console.log(`[Frequency] GEVONDEN in frame ${fi} (${frameUrl.substring(0, 80)})`);
-        console.log(`[Frequency] Normaal: ${freq.km} km / ${freq.months} maanden`);
-        if (freq.km_heavy) {
-          console.log(`[Frequency] Zwaar: ${freq.km_heavy} km / ${freq.months_heavy} maanden`);
+      // ── Verwerk tabel-resultaat ──
+      if (freq && freq.method === 'table') {
+        console.log(`[Frequency] Tabel gevonden! normaalIdx=${freq.normaalIdx}, zwaarIdx=${freq.zwaarIdx}`);
+        console.log(`[Frequency] Normaal cel: "${freq.normaalText}"`);
+        console.log(`[Frequency] Zwaar cel: "${freq.zwaarText}"`);
+
+        const normal = parseFreqValue(freq.normaalText);
+        const heavy = parseFreqValue(freq.zwaarText);
+
+        if (normal) {
+          console.log(`[Frequency] Normaal: ${normal.km} km / ${normal.months} maanden`);
+          return {
+            km: normal.km, months: normal.months, condition: 'normaal',
+            km_heavy: heavy ? heavy.km : null, months_heavy: heavy ? heavy.months : null,
+            source: 'servicebox_schema',
+            raw: `Normaal: ${freq.normaalText} | Zwaar: ${freq.zwaarText}`
+          };
+        } else {
+          console.log(`[Frequency] Kon normaal-cel niet parsen: "${freq.normaalText}"`);
+          // Niet terugvallen op zwaar — liever null zodat duidelijk is dat het ontbreekt
         }
-        return freq;
+        continue;
+      }
+
+      // ── Verwerk regex-resultaat ──
+      if (freq && freq.method === 'regex') {
+        const first = freq.matches[0];
+        const normal = parseFreqValue(first.full);
+        const heavy = freq.matches.length > 1 ? parseFreqValue(freq.matches[1].full) : null;
+
+        if (normal) {
+          console.log(`[Frequency] Regex match: ${normal.km} km / ${normal.months} maanden (uit "${first.full}")`);
+          return {
+            km: normal.km, months: normal.months, condition: 'normaal',
+            km_heavy: heavy ? heavy.km : null, months_heavy: heavy ? heavy.months : null,
+            source: 'servicebox_schema',
+            raw: freq.matches.map(m => m.full).join(' | ')
+          };
+        }
       }
     } catch (e) {
       console.log(`[Frequency] Frame ${fi}: error - ${e.message.substring(0, 100)}`);
@@ -1296,10 +1599,11 @@ async function scrapeQuotelink(vin, kmStand) {
 
   } catch (error) {
     console.error('[Quotelink] Error:', error.message);
+    console.error('[Quotelink] Stack:', error.stack?.substring(0, 500));
     try {
       await page.screenshot({ path: `error-vin-${Date.now()}.png` });
     } catch (e) { /* ignore */ }
-    throw error;
+    throw new Error(sanitizeErrorMessage(error.message));
   } finally {
     await browser.close();
   }
@@ -2171,11 +2475,12 @@ async function activateWarranty(vin, kmStand, customerEmail) {
 
   } catch (error) {
     console.error(`[Warranty] Error: ${error.message}`);
+    console.error(`[Warranty] Stack: ${error.stack?.substring(0, 500)}`);
     try {
       await page.screenshot({ path: `error-warranty-${Date.now()}.png` });
     } catch (e) { /* ignore */ }
     await browser.close();
-    throw error;
+    throw new Error(sanitizeErrorMessage(error.message));
   }
 }
 
