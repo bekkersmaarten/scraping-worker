@@ -498,10 +498,11 @@ async function extractMaintenance(page, context, kmStand, vin) {
     serviceFrequencyFromDoc = await extractFrequencyFromDocumentation(page, context, vin);
     if (serviceFrequencyFromDoc) {
       console.log(`[Maintenance] Frequentie via Documentatie: ${serviceFrequencyFromDoc.km} km / ${serviceFrequencyFromDoc.months} maanden`);
+      console.log('[Maintenance] PDF gevonden — skip Menu Pricing (niet nodig)');
+      return { intervals: [], interval_pricing: [], prices: [], service_frequency: serviceFrequencyFromDoc };
     } else {
-      console.log('[Maintenance] Documentatie route leverde geen frequentie op');
+      console.log('[Maintenance] Documentatie route leverde geen frequentie op, probeer Menu Pricing...');
     }
-    // Navigeer terug naar Auto tab voor Menu pricing (Documentatie navigatie kan pagina veranderd hebben)
   }
 
   console.log('[Maintenance] Zoeken naar Menu pricing link...');
