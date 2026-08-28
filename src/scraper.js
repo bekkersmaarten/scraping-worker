@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const pdfParse = require('pdf-parse');
 
 /**
  * Servicebox Scraper — v2 (gebaseerd op echte HTML structuur)
@@ -92,10 +93,18 @@ async function scrapeServicebox(kenteken, kmStand) {
     const recalls = await extractRecalls(page);
 
     // STAP 4: Ga terug naar Auto tab, klik Menu pricing → extract onderhoud
-    const { intervals, interval_pricing, prices, service_frequency } = await extractMaintenance(page, context, kmStand);
+    const vin = vehicleData?.vin || kenteken;
+    const { intervals, interval_pricing, prices, service_frequency } = await extractMaintenance(page, context, kmStand, vin);
 
     console.log('[Scraper] Scrape voltooid!');
-    return { vehicle: vehicleData, recalls, intervals, interval_pricing, prices, service_frequency };
+    return {
+      vehicle: vehicleData, recalls, intervals, interval_pricing, prices,
+      service_frequency,
+      // Top-level convenience velden voor directe mapping in Supabase
+      service_frequency_km: service_frequency?.km || null,
+      service_frequency_months: service_frequency?.months || null,
+      service_frequency_source: service_frequency?.source || null
+    };
 
   } catch (error) {
     console.error('[Scraper] Error:', error.message);
@@ -480,7 +489,21 @@ async function extractRecalls(page) {
 // =========================================
 // MENU PRICING / ONDERHOUD
 // =========================================
-async function extractMaintenance(page, context, kmStand) {
+async function extractMaintenance(page, context, kmStand, vin) {
+  console.log('[Maintenance] Start onderhoud extractie...');
+
+  // ── PRIMAIRE METHODE: Documentatie route (PDF met exact schema) ──
+  let serviceFrequencyFromDoc = null;
+  if (vin) {
+    serviceFrequencyFromDoc = await extractFrequencyFromDocumentation(page, context, vin);
+    if (serviceFrequencyFromDoc) {
+      console.log(`[Maintenance] Frequentie via Documentatie: ${serviceFrequencyFromDoc.km} km / ${serviceFrequencyFromDoc.months} maanden`);
+    } else {
+      console.log('[Maintenance] Documentatie route leverde geen frequentie op');
+    }
+    // Navigeer terug naar Auto tab voor Menu pricing (Documentatie navigatie kan pagina veranderd hebben)
+  }
+
   console.log('[Maintenance] Zoeken naar Menu pricing link...');
 
   // Eerst terug naar Auto tab
@@ -560,9 +583,8 @@ async function extractMaintenance(page, context, kmStand) {
       executed = true;
     } catch (e) {
       console.log(`[Maintenance] /mp/ direct openen mislukt: ${e.message.substring(0, 100)}`);
-      console.log('[Maintenance] Menu pricing niet beschikbaar — probeer ESA route...');
-      const esaResult = await extractFromESA(page, context);
-      return { intervals: [], prices: [], interval_pricing: [], service_frequency: esaResult };
+      const freq = serviceFrequencyFromDoc || await extractFromESA(page, context);
+      return { intervals: [], prices: [], interval_pricing: [], service_frequency: freq };
     }
   }
 
@@ -594,21 +616,29 @@ async function extractMaintenance(page, context, kmStand) {
   }
 
   if (!menuPricingPage) {
-    console.log('[Maintenance] Geen Menu pricing pagina gevonden — probeer ESA route...');
-    const esaResult = await extractFromESA(page, context);
-    return { intervals: [], prices: [], interval_pricing: [], service_frequency: esaResult };
+    console.log('[Maintenance] Geen Menu pricing pagina gevonden');
+    // Gebruik Documentatie-resultaat, of probeer ESA als fallback
+    const freq = serviceFrequencyFromDoc || await extractFromESA(page, context);
+    return { intervals: [], prices: [], interval_pricing: [], service_frequency: freq };
   }
 
   console.log(`[Maintenance] Menu pricing gevonden: ${menuPricingPage.url()}`);
   await menuPricingPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   await menuPricingPage.waitForTimeout(3000);
 
-  // ── Probeer frequentie VÓÓR "GA VERDER" te extraheren ──
-  // Op sommige systemen (Opel/Vauxhall) staat de frequentie op de Vehicle-pagina
-  console.log('[Maintenance] Frequentie zoeken VOOR GA VERDER...');
-  let serviceFrequency = await extractServiceFrequency(menuPricingPage);
-  if (serviceFrequency) {
-    console.log('[Maintenance] Frequentie gevonden op Vehicle-pagina (voor GA VERDER)!');
+  // Gebruik Documentatie-resultaat als primaire bron; anders probeer Menu Pricing
+  let serviceFrequency = serviceFrequencyFromDoc || null;
+
+  if (!serviceFrequency) {
+    // ── Probeer frequentie VÓÓR "GA VERDER" te extraheren ──
+    // Op sommige systemen (Opel/Vauxhall) staat de frequentie op de Vehicle-pagina
+    console.log('[Maintenance] Frequentie zoeken VOOR GA VERDER...');
+    serviceFrequency = await extractServiceFrequency(menuPricingPage);
+    if (serviceFrequency) {
+      console.log('[Maintenance] Frequentie gevonden op Vehicle-pagina (voor GA VERDER)!');
+    }
+  } else {
+    console.log('[Maintenance] Frequentie al via Documentatie gevonden, skip Menu Pricing frequentie');
   }
 
   // We landen op de Prijsopgave/Vehicle-pagina. Klik "GA VERDER" om naar
@@ -721,7 +751,424 @@ async function extractMaintenance(page, context, kmStand) {
     serviceFrequency = await extractFromESA(page, context);
   }
 
+  // Laatste fallback: leid frequentie af uit de intervallenlijst
+  // Bijv. intervallen [30000, 60000, 90000, ...] → frequentie = 30000 km
+  // "Jaarlijkse onderhoudsbeurt" → 12 maanden
+  if (!serviceFrequency && intervals.length > 0) {
+    console.log('[Maintenance] Frequentie afleiden uit intervallen...');
+    const kmIntervals = intervals
+      .filter(i => i.type === 'km')
+      .map(i => i.sort * 1000)
+      .sort((a, b) => a - b);
+
+    const hasYearly = intervals.some(i => i.type === 'yearly');
+
+    if (kmIntervals.length >= 2) {
+      // Bereken kleinste verschil (GCD-achtig) tussen opeenvolgende intervallen
+      let minDiff = kmIntervals[1] - kmIntervals[0];
+      for (let i = 2; i < kmIntervals.length; i++) {
+        const diff = kmIntervals[i] - kmIntervals[i - 1];
+        if (diff > 0 && diff < minDiff) minDiff = diff;
+      }
+      // Controleer of het eerste interval gelijk is aan de stap (30k, 60k, 90k → stap=30k, eerste=30k ✓)
+      if (kmIntervals[0] === minDiff) {
+        const months = hasYearly ? 12 : null;
+        console.log(`[Maintenance] Afgeleid uit intervallen: ${minDiff} km / ${months || '?'} maanden`);
+        serviceFrequency = {
+          km: minDiff,
+          months: months,
+          condition: 'normaal',
+          km_heavy: null, months_heavy: null,
+          source: 'afgeleid_uit_intervallen',
+          raw: `Intervallen: ${kmIntervals.join(', ')} km${hasYearly ? ' + Jaarlijks' : ''}`
+        };
+      }
+    } else if (kmIntervals.length === 1) {
+      // Slechts 1 km-interval: gebruik dat als frequentie
+      const months = hasYearly ? 12 : null;
+      console.log(`[Maintenance] Enkel interval: ${kmIntervals[0]} km / ${months || '?'} maanden`);
+      serviceFrequency = {
+        km: kmIntervals[0],
+        months: months,
+        condition: 'normaal',
+        km_heavy: null, months_heavy: null,
+        source: 'afgeleid_uit_intervallen',
+        raw: `Enkel interval: ${kmIntervals[0]} km${hasYearly ? ' + Jaarlijks' : ''}`
+      };
+    }
+  }
+
   return { intervals, interval_pricing, prices, service_frequency: serviceFrequency };
+}
+
+// =========================================
+// DOCUMENTATIE ROUTE — onderhoudsschema PDF uit Servicebox
+// =========================================
+/**
+ * Navigeert via DOCUMENTATIE → Technische documentatie → Onderhoudsschema's → PDF
+ * om de exacte onderhoudsfrequentie uit de "Normale gebruiksomstandigheden" kolom te halen.
+ *
+ * Stappen:
+ * 1. Hover over DOCUMENTATIE tab → klik Technische documentatie
+ * 2. VIN invoeren, OK klikken
+ * 3. Klik Onderhoudsschema's
+ * 4. Selecteer tab "Overzicht onderhoud"
+ * 5. Dropdown Gebruiksomstandigheden → Normaal, klik Zoeken
+ * 6. PDF opent → download/intercept → parse tabel
+ *
+ * @param {Page} page - De Servicebox hoofdpagina (ingelogd, voertuig al opgezocht)
+ * @param {BrowserContext} context - Browser context voor nieuwe pagina's
+ * @param {string} vin - Chassisnummer
+ * @returns {Object|null} { km, months, condition, source, raw } of null
+ */
+async function extractFrequencyFromDocumentation(page, context, vin) {
+  console.log('[Documentatie] Start frequentie-extractie via Onderhoudsschema PDF...');
+
+  try {
+    // ── STAP 1: Navigeer naar Technische documentatie ──
+    // De DOCUMENTATIE tab heeft een submenu dat verschijnt bij hover
+    let techDocClicked = false;
+
+    for (const frame of page.frames()) {
+      try {
+        // Zoek DOCUMENTATIE menu-item en hover
+        const docTab = await frame.$('a:has-text("DOCUMENTATIE"), a:has-text("Documentatie"), span:has-text("DOCUMENTATIE")');
+        if (docTab) {
+          console.log('[Documentatie] DOCUMENTATIE tab gevonden, hover...');
+          await docTab.hover();
+          await frame.waitForTimeout(1000);
+
+          // Zoek "Technische documentatie" in het submenu
+          const techDoc = await frame.$('a:has-text("Technische documentatie"), a:has-text("Technical documentation")');
+          if (techDoc) {
+            console.log('[Documentatie] Technische documentatie link gevonden, klikken...');
+            await techDoc.click();
+            techDocClicked = true;
+            break;
+          }
+
+          // Fallback: zoek in hele pagina na hover
+          for (const f2 of page.frames()) {
+            const techDoc2 = await f2.$('a:has-text("Technische documentatie"), a:has-text("Technical documentation")');
+            if (techDoc2) {
+              await techDoc2.click();
+              techDocClicked = true;
+              break;
+            }
+          }
+          if (techDocClicked) break;
+        }
+      } catch (e) { continue; }
+    }
+
+    // Fallback: probeer goTo als beschikbaar
+    if (!techDocClicked) {
+      for (const frame of page.frames()) {
+        try {
+          const hasGoTo = await frame.evaluate(() => typeof goTo === 'function');
+          if (hasGoTo) {
+            // Probeer bekende documentatie-paden
+            for (const path of ['/docapvpr/', '/doc/', '/documentation/']) {
+              try {
+                await frame.evaluate((p) => goTo(p), path);
+                techDocClicked = true;
+                console.log(`[Documentatie] goTo('${path}') uitgevoerd`);
+                break;
+              } catch (e) { continue; }
+            }
+            if (techDocClicked) break;
+          }
+        } catch (e) { continue; }
+      }
+    }
+
+    if (!techDocClicked) {
+      console.log('[Documentatie] Kon Technische documentatie niet bereiken');
+      return null;
+    }
+
+    await page.waitForTimeout(3000);
+
+    // Zoek de documentatie pagina (kan in nieuw venster of in bestaande frame zijn)
+    let docPage = null;
+    const allPages = context.pages();
+    for (const p of allPages) {
+      const url = p.url();
+      if (url.includes('docapvpr') || url.includes('documentation') || url.includes('/doc/')) {
+        docPage = p;
+        break;
+      }
+    }
+
+    // Als geen nieuwe pagina, gebruik de hoofdpagina (documentatie opent in frame)
+    if (!docPage) docPage = page;
+    console.log(`[Documentatie] Documentatie pagina: ${docPage.url().substring(0, 100)}`);
+    await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+    // ── STAP 2: VIN invoeren (als er een invoerveld is) ──
+    let vinEntered = false;
+    for (const frame of docPage.frames()) {
+      try {
+        // Zoek VIN/chassis invoerveld
+        const vinInput = await frame.$('input[name*="vin" i], input[name*="chassis" i], input[id*="vin" i], input[id*="chassis" i], input[name*="short" i], input#short-vin');
+        if (vinInput) {
+          await vinInput.fill(vin);
+          console.log(`[Documentatie] VIN ingevuld: ${vin}`);
+
+          // Klik OK/Zoeken
+          const okBtn = await frame.$('button:has-text("OK"), input[value="OK"], button:has-text("Zoeken"), input[value*="Zoek"], button:has-text("Search")');
+          if (okBtn) {
+            await okBtn.click();
+            vinEntered = true;
+            console.log('[Documentatie] OK geklikt');
+            await docPage.waitForTimeout(3000);
+            await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+          }
+          break;
+        }
+      } catch (e) { continue; }
+    }
+
+    if (!vinEntered) {
+      console.log('[Documentatie] Geen VIN-invoerveld gevonden (mogelijk al voertuig geselecteerd)');
+    }
+
+    // ── STAP 3: Klik Onderhoudsschema's ──
+    let schemaClicked = false;
+    for (const frame of docPage.frames()) {
+      try {
+        const schemaLink = await frame.$('a:has-text("Onderhoudsschema"), button:has-text("Onderhoudsschema"), a:has-text("Maintenance schedule"), span:has-text("Onderhoudsschema")');
+        if (schemaLink) {
+          console.log('[Documentatie] Onderhoudsschema\'s link gevonden');
+          await schemaLink.click();
+          schemaClicked = true;
+          await docPage.waitForTimeout(3000);
+          await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+          break;
+        }
+      } catch (e) { continue; }
+    }
+
+    if (!schemaClicked) {
+      console.log('[Documentatie] Onderhoudsschema\'s link niet gevonden');
+      // Log beschikbare links voor debugging
+      for (const frame of docPage.frames()) {
+        try {
+          const links = await frame.evaluate(() =>
+            Array.from(document.querySelectorAll('a, button')).map(el => el.textContent?.trim()).filter(t => t && t.length > 2).slice(0, 20)
+          );
+          if (links.length > 0) console.log(`[Documentatie] Beschikbare links: ${links.join(', ')}`);
+        } catch (e) { continue; }
+      }
+      return null;
+    }
+
+    // ── STAP 4: Selecteer tab "Overzicht onderhoud" ──
+    for (const frame of docPage.frames()) {
+      try {
+        const overzichtTab = await frame.$('a:has-text("Overzicht onderhoud"), button:has-text("Overzicht onderhoud"), [role="tab"]:has-text("Overzicht"), a:has-text("Maintenance overview")');
+        if (overzichtTab) {
+          console.log('[Documentatie] Tab "Overzicht onderhoud" gevonden, klikken...');
+          await overzichtTab.click();
+          await docPage.waitForTimeout(2000);
+          break;
+        }
+      } catch (e) { continue; }
+    }
+
+    // ── STAP 5: Dropdown Gebruiksomstandigheden → Normaal, klik Zoeken ──
+    for (const frame of docPage.frames()) {
+      try {
+        // Zoek dropdown met gebruiksomstandigheden
+        const selects = await frame.$$('select');
+        for (const select of selects) {
+          const options = await select.evaluate(el =>
+            Array.from(el.options).map(o => ({ value: o.value, text: o.textContent?.trim() }))
+          );
+          const normaalOpt = options.find(o => /normaa?l/i.test(o.text));
+          if (normaalOpt) {
+            console.log(`[Documentatie] Dropdown gevonden met Normaal optie: "${normaalOpt.text}" (value: ${normaalOpt.value})`);
+            await select.selectOption(normaalOpt.value);
+            await frame.waitForTimeout(500);
+            break;
+          }
+        }
+
+        // Klik Zoeken
+        const searchBtn = await frame.$('button:has-text("Zoeken"), input[value*="Zoek"], button:has-text("Search"), input[value="OK"]');
+        if (searchBtn) {
+          console.log('[Documentatie] Zoeken knop klikken...');
+
+          // Setup PDF interceptie VOORDAT we klikken
+          const pdfPromise = new Promise((resolve) => {
+            const timeout = setTimeout(() => resolve(null), 20000);
+
+            // Methode 1: Intercept als download
+            context.on('page', async (newPage) => {
+              try {
+                const url = newPage.url();
+                console.log(`[Documentatie] Nieuwe pagina geopend: ${url.substring(0, 100)}`);
+                if (url.includes('synthesePE') || url.includes('.pdf') || url.includes('docapvpr')) {
+                  clearTimeout(timeout);
+                  // Wacht tot de pagina geladen is en probeer de response te lezen
+                  await newPage.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
+                  resolve(newPage);
+                }
+              } catch (e) { /* ignore */ }
+            });
+
+            // Methode 2: Intercept response op huidige pagina
+            docPage.on('response', async (response) => {
+              try {
+                const url = response.url();
+                const contentType = response.headers()['content-type'] || '';
+                if (contentType.includes('pdf') || url.includes('synthesePE') || url.includes('.pdf')) {
+                  console.log(`[Documentatie] PDF response gedetecteerd: ${url.substring(0, 100)}`);
+                  clearTimeout(timeout);
+                  const buffer = await response.body();
+                  resolve({ buffer, url });
+                }
+              } catch (e) { /* ignore */ }
+            });
+          });
+
+          await searchBtn.click();
+          console.log('[Documentatie] Wachten op PDF...');
+
+          const pdfResult = await pdfPromise;
+
+          if (!pdfResult) {
+            console.log('[Documentatie] Geen PDF ontvangen binnen timeout');
+            return null;
+          }
+
+          // Parse de PDF
+          let pdfBuffer;
+          if (pdfResult.buffer) {
+            // Direct response buffer
+            pdfBuffer = pdfResult.buffer;
+            console.log(`[Documentatie] PDF buffer ontvangen (${pdfBuffer.length} bytes) van ${pdfResult.url.substring(0, 80)}`);
+          } else if (pdfResult.url) {
+            // Nieuwe pagina met PDF URL — fetch de PDF
+            try {
+              const pdfUrl = pdfResult.url();
+              console.log(`[Documentatie] PDF pagina: ${pdfUrl.substring(0, 100)}`);
+              // Gebruik de context cookies om de PDF op te halen
+              const response = await pdfResult.goto(pdfUrl, { waitUntil: 'load', timeout: 15000 });
+              if (response) {
+                pdfBuffer = await response.body();
+                console.log(`[Documentatie] PDF gedownload: ${pdfBuffer.length} bytes`);
+              }
+              await pdfResult.close().catch(() => {});
+            } catch (e) {
+              console.log(`[Documentatie] PDF downloaden mislukt: ${e.message.substring(0, 100)}`);
+              // Probeer via de pagina tekst te lezen (soms toont browser PDF als tekst)
+              try {
+                const text = await pdfResult.evaluate(() => document.body?.innerText || '');
+                if (text.length > 100) {
+                  console.log(`[Documentatie] Pagina tekst (${text.length} chars): ${text.substring(0, 300)}`);
+                  return parsePdfText(text);
+                }
+              } catch (e2) { /* ignore */ }
+              await pdfResult.close().catch(() => {});
+              return null;
+            }
+          } else {
+            console.log('[Documentatie] Onverwacht PDF resultaat type');
+            return null;
+          }
+
+          // Parse PDF met pdf-parse
+          try {
+            const pdfData = await pdfParse(pdfBuffer);
+            console.log(`[Documentatie] PDF geparsed: ${pdfData.numpages} pagina's, ${pdfData.text.length} chars`);
+            console.log(`[Documentatie] PDF tekst (eerste 500): ${pdfData.text.substring(0, 500)}`);
+            return parsePdfText(pdfData.text);
+          } catch (parseErr) {
+            console.log(`[Documentatie] PDF parse fout: ${parseErr.message.substring(0, 100)}`);
+            return null;
+          }
+        }
+      } catch (e) {
+        console.log(`[Documentatie] Frame error: ${e.message.substring(0, 100)}`);
+        continue;
+      }
+    }
+
+    console.log('[Documentatie] Kon geen PDF genereren');
+    return null;
+
+  } catch (error) {
+    console.log(`[Documentatie] Error: ${error.message.substring(0, 150)}`);
+    return null;
+  }
+}
+
+/**
+ * Parse de tekst uit de onderhoudsschema PDF.
+ * Zoekt de rij "systematische controles" onder "Normale gebruiksomstandigheden"
+ * en extraheert "Elk 25000 Km / 1 jaar" → { km: 25000, months: 12 }
+ */
+function parsePdfText(text) {
+  console.log('[Documentatie] Parsen van PDF tekst...');
+
+  // De PDF tekst heeft typisch deze structuur (kolommen lopen door als tekst):
+  // ONDERHOUD  Normale gebruiksomstandigheden  Zware gebruiksomstandigheden
+  // SYSTEMATISCHE WERKZAAMHEDEN
+  // Onderhoudsbeurten: systematische controles  Elk 25000 Km / 1 jaar  Elk 15000 Km / 1 jaar
+
+  // Strategie 1: Zoek expliciet "systematische controles" gevolgd door "Elk XX Km / Y jaar"
+  const systematicPattern = /systemat\w+\s+controles?\s+(Elk[e]?\s+\d[\d.\s]*\s*[Kk][Mm]\s*\/\s*\d+\s*(?:jaar|maand(?:en)?))/i;
+  const match1 = text.match(systematicPattern);
+  if (match1) {
+    console.log(`[Documentatie] Systematische controles match: "${match1[1]}"`);
+    const parsed = parseFreqString(match1[1]);
+    if (parsed) return { ...parsed, condition: 'normaal', source: 'servicebox_documentatie', raw: match1[1] };
+  }
+
+  // Strategie 2: Zoek alle "Elk X Km / Y jaar" patronen — het eerste na "SYSTEMATISCHE" is de juiste
+  const sysIdx = text.search(/SYSTEMAT/i);
+  if (sysIdx > -1) {
+    const afterSys = text.substring(sysIdx);
+    const elkPattern = /Elk[e]?\s+(\d[\d.\s]*)\s*[Kk][Mm]\s*\/\s*(\d+)\s*(jaar|jaren|maand(?:en)?)/i;
+    const match2 = afterSys.match(elkPattern);
+    if (match2) {
+      const raw = match2[0];
+      console.log(`[Documentatie] Eerste Elk-match na SYSTEMATISCHE: "${raw}"`);
+      const parsed = parseFreqString(raw);
+      if (parsed) return { ...parsed, condition: 'normaal', source: 'servicebox_documentatie', raw };
+    }
+  }
+
+  // Strategie 3: Breed zoeken — eerste "Elk X Km / Y jaar" in hele tekst
+  const elkBroad = /Elk[e]?\s+(\d[\d.\s]*)\s*[Kk][Mm]\s*\/\s*(\d+)\s*(jaar|jaren|maand(?:en)?)/i;
+  const match3 = text.match(elkBroad);
+  if (match3) {
+    const raw = match3[0];
+    console.log(`[Documentatie] Brede Elk-match: "${raw}"`);
+    const parsed = parseFreqString(raw);
+    if (parsed) return { ...parsed, condition: 'normaal', source: 'servicebox_documentatie', raw };
+  }
+
+  console.log('[Documentatie] Geen frequentie gevonden in PDF tekst');
+  return null;
+}
+
+/**
+ * Parse "Elk 25000 Km / 1 jaar" of "Elk 25.000 Km / 1 jaar" → { km: 25000, months: 12 }
+ */
+function parseFreqString(str) {
+  const kmMatch = str.match(/(\d[\d.\s]*)\s*[Kk][Mm]/);
+  const periodMatch = str.match(/(\d+)\s*(jaar|jaren|maand|maanden)/i);
+  if (!kmMatch || !periodMatch) return null;
+
+  const km = parseInt(kmMatch[1].replace(/[.\s]/g, ''));
+  const period = parseInt(periodMatch[1]);
+  const unit = periodMatch[2].toLowerCase();
+  const months = (unit.startsWith('jaar') || unit.startsWith('jaren')) ? period * 12 : period;
+
+  if (isNaN(km) || isNaN(months) || km < 1000) return null;
+  return { km, months, km_heavy: null, months_heavy: null };
 }
 
 // =========================================
@@ -1585,7 +2032,7 @@ async function scrapeQuotelink(vin, kmStand) {
     const vehicleData = await searchAndExtractVehicle(page, vin);
 
     // STAP 3: Skip recalls — ga direct naar Menu pricing
-    const { intervals, interval_pricing, prices, service_frequency } = await extractMaintenance(page, context, kmStand);
+    const { intervals, interval_pricing, prices, service_frequency } = await extractMaintenance(page, context, kmStand, vin);
 
     console.log('[Quotelink] VIN lookup voltooid!');
     return {
@@ -1594,7 +2041,11 @@ async function scrapeQuotelink(vin, kmStand) {
       intervals,
       interval_pricing,
       prices,
-      service_frequency
+      service_frequency,
+      // Top-level convenience velden voor directe mapping in Supabase
+      service_frequency_km: service_frequency?.km || null,
+      service_frequency_months: service_frequency?.months || null,
+      service_frequency_source: service_frequency?.source || null
     };
 
   } catch (error) {
