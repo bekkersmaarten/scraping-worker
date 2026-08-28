@@ -906,32 +906,84 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
     console.log(`[Documentatie] Documentatie pagina: ${docPage.url().substring(0, 100)}`);
     await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 
-    // ── STAP 2: VIN invoeren (als er een invoerveld is) ──
+    // ── STAP 2: VIN invoeren en OK klikken ──
     let vinEntered = false;
     for (const frame of docPage.frames()) {
       try {
-        // Zoek VIN/chassis invoerveld
+        // Zoek ALLE text inputs (docapvpr gebruikt soms generieke input velden)
         const vinInput = await frame.$('input[name*="vin" i], input[name*="chassis" i], input[id*="vin" i], input[id*="chassis" i], input[name*="short" i], input#short-vin');
         if (vinInput) {
           await vinInput.fill(vin);
           console.log(`[Documentatie] VIN ingevuld: ${vin}`);
 
-          // Klik OK/Zoeken
-          const okBtn = await frame.$('button:has-text("OK"), input[value="OK"], button:has-text("Zoeken"), input[value*="Zoek"], button:has-text("Search")');
-          if (okBtn) {
-            await okBtn.click();
+          // Brede OK/submit knop detectie
+          const okSelectors = [
+            'input[type="submit"]',
+            'button[type="submit"]',
+            'input[value="OK"]', 'input[value="Ok"]', 'input[value="ok"]',
+            'button:has-text("OK")', 'button:has-text("Zoeken")', 'button:has-text("Search")',
+            'input[value*="Zoek"]', 'input[value*="Search"]', 'input[value*="Valid"]',
+            'a:has-text("OK")', 'a.button:has-text("OK")',
+            'input[type="button"][value="OK"]'
+          ];
+          let okClicked = false;
+          for (const sel of okSelectors) {
+            const okBtn = await frame.$(sel);
+            if (okBtn) {
+              const btnText = await okBtn.evaluate(el => el.value || el.textContent || '').catch(() => '');
+              console.log(`[Documentatie] OK knop gevonden via "${sel}": "${btnText.trim().substring(0, 30)}"`);
+              await okBtn.click();
+              okClicked = true;
+              break;
+            }
+          }
+
+          if (okClicked) {
             vinEntered = true;
-            console.log('[Documentatie] OK geklikt');
+            console.log('[Documentatie] OK geklikt, wachten op laden...');
             await docPage.waitForTimeout(3000);
             await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+          } else {
+            console.log('[Documentatie] VIN ingevuld maar OK knop niet gevonden');
+            // Log alle knoppen/inputs in dit frame
+            const btns = await frame.evaluate(() =>
+              Array.from(document.querySelectorAll('input[type="submit"], input[type="button"], button, a.button')).map(el => ({
+                tag: el.tagName, type: el.type, value: el.value, text: el.textContent?.trim()?.substring(0, 30)
+              }))
+            );
+            console.log(`[Documentatie] Beschikbare knoppen: ${JSON.stringify(btns)}`);
+
+            // Probeer form submit als fallback
+            const submitted = await frame.evaluate(() => {
+              const form = document.querySelector('form');
+              if (form) { form.submit(); return true; }
+              return false;
+            });
+            if (submitted) {
+              vinEntered = true;
+              console.log('[Documentatie] Formulier direct gesubmit (form.submit())');
+              await docPage.waitForTimeout(3000);
+              await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+            }
           }
           break;
         }
       } catch (e) { continue; }
     }
 
+    // Als geen VIN input gevonden, log wat er wél op de pagina staat
     if (!vinEntered) {
-      console.log('[Documentatie] Geen VIN-invoerveld gevonden (mogelijk al voertuig geselecteerd)');
+      console.log('[Documentatie] VIN niet ingevoerd — probeer toch door te gaan (voertuig mogelijk al geselecteerd)');
+      for (const frame of docPage.frames()) {
+        try {
+          const inputs = await frame.evaluate(() =>
+            Array.from(document.querySelectorAll('input:not([type="hidden"])')).map(el => ({
+              name: el.name, id: el.id, type: el.type, value: el.value?.substring(0, 30), placeholder: el.placeholder
+            })).slice(0, 10)
+          );
+          if (inputs.length > 0) console.log(`[Documentatie] Inputs in frame: ${JSON.stringify(inputs)}`);
+        } catch (e) { continue; }
+      }
     }
 
     // ── STAP 3: Klik Onderhoudsschema's ──
@@ -940,11 +992,20 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
       try {
         const schemaLink = await frame.$('a:has-text("Onderhoudsschema"), button:has-text("Onderhoudsschema"), a:has-text("Maintenance schedule"), span:has-text("Onderhoudsschema")');
         if (schemaLink) {
-          console.log('[Documentatie] Onderhoudsschema\'s link gevonden');
+          const linkText = await schemaLink.evaluate(el => el.textContent?.trim()?.substring(0, 50));
+          console.log(`[Documentatie] Onderhoudsschema's link gevonden: "${linkText}"`);
           await schemaLink.click();
           schemaClicked = true;
-          await docPage.waitForTimeout(3000);
+          console.log('[Documentatie] Onderhoudsschema\'s geklikt, wachten op navigatie...');
+          await docPage.waitForTimeout(5000);
           await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+          // Na klik: log wat de frames nu tonen
+          for (const f of docPage.frames()) {
+            try {
+              const txt = await f.evaluate(() => document.body?.innerText?.substring(0, 200) || '');
+              if (txt.length > 20) console.log(`[Documentatie] Frame na schema-klik: ${f.url().substring(0, 60)} → ${txt.substring(0, 120)}`);
+            } catch (e) { /* ignore */ }
+          }
           break;
         }
       } catch (e) { continue; }
@@ -1026,7 +1087,7 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
 
           // Luister op ELKE nieuwe pagina (niet filteren op URL — formSubmitForward redirect)
           const newPagePromise = new Promise((resolve) => {
-            const timeout = setTimeout(() => resolve(null), 30000);
+            const timeout = setTimeout(() => resolve(null), 45000);
             const handler = (newPage) => {
               clearTimeout(timeout);
               console.log(`[Documentatie] Nieuwe pagina geopend: ${newPage.url().substring(0, 100)}`);
