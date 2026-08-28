@@ -964,19 +964,35 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
     }
 
     // ── STAP 4: Selecteer tab "Overzicht onderhoud" ──
+    let overzichtFound = false;
     for (const frame of docPage.frames()) {
       try {
         const overzichtTab = await frame.$('a:has-text("Overzicht onderhoud"), button:has-text("Overzicht onderhoud"), [role="tab"]:has-text("Overzicht"), a:has-text("Maintenance overview")');
         if (overzichtTab) {
           console.log('[Documentatie] Tab "Overzicht onderhoud" gevonden, klikken...');
           await overzichtTab.click();
+          overzichtFound = true;
           await docPage.waitForTimeout(2000);
           break;
         }
       } catch (e) { continue; }
     }
+    if (!overzichtFound) {
+      console.log('[Documentatie] Tab "Overzicht onderhoud" niet gevonden, probeer toch door te gaan...');
+      // Log beschikbare tabs/links voor debugging
+      for (const frame of docPage.frames()) {
+        try {
+          const items = await frame.evaluate(() =>
+            Array.from(document.querySelectorAll('a, button, [role="tab"], li')).map(el => el.textContent?.trim()).filter(t => t && t.length > 1 && t.length < 60).slice(0, 25)
+          );
+          if (items.length > 0) console.log(`[Documentatie] Beschikbare items in frame: ${items.join(' | ')}`);
+        } catch (e) { continue; }
+      }
+    }
 
     // ── STAP 5: Dropdown Gebruiksomstandigheden → Normaal, klik Zoeken ──
+    let dropdownFound = false;
+    let searchBtnFound = false;
     for (const frame of docPage.frames()) {
       try {
         // Zoek dropdown met gebruiksomstandigheden
@@ -989,8 +1005,11 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
           if (normaalOpt) {
             console.log(`[Documentatie] Dropdown gevonden met Normaal optie: "${normaalOpt.text}" (value: ${normaalOpt.value})`);
             await select.selectOption(normaalOpt.value);
+            dropdownFound = true;
             await frame.waitForTimeout(500);
             break;
+          } else if (options.length > 0) {
+            console.log(`[Documentatie] Select gevonden maar geen Normaal optie. Opties: ${options.map(o => o.text).join(', ')}`);
           }
         }
 
@@ -1000,81 +1019,115 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
           console.log('[Documentatie] Zoeken knop klikken...');
 
           // Setup PDF interceptie VOORDAT we klikken
-          const pdfPromise = new Promise((resolve) => {
-            const timeout = setTimeout(() => resolve(null), 20000);
+          // Na "Zoeken" opent formSubmitForward → redirect naar synthesePE.do (PDF)
+          let pdfBuffer = null;
+          let pdfNewPage = null;
 
-            // Methode 1: Intercept als download
-            context.on('page', async (newPage) => {
-              try {
-                const url = newPage.url();
-                console.log(`[Documentatie] Nieuwe pagina geopend: ${url.substring(0, 100)}`);
-                if (url.includes('synthesePE') || url.includes('.pdf') || url.includes('docapvpr')) {
-                  clearTimeout(timeout);
-                  // Wacht tot de pagina geladen is en probeer de response te lezen
-                  await newPage.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
-                  resolve(newPage);
-                }
-              } catch (e) { /* ignore */ }
-            });
-
-            // Methode 2: Intercept response op huidige pagina
-            docPage.on('response', async (response) => {
-              try {
-                const url = response.url();
-                const contentType = response.headers()['content-type'] || '';
-                if (contentType.includes('pdf') || url.includes('synthesePE') || url.includes('.pdf')) {
-                  console.log(`[Documentatie] PDF response gedetecteerd: ${url.substring(0, 100)}`);
-                  clearTimeout(timeout);
-                  const buffer = await response.body();
-                  resolve({ buffer, url });
-                }
-              } catch (e) { /* ignore */ }
-            });
+          // Luister op ELKE nieuwe pagina (niet filteren op URL — formSubmitForward redirect)
+          const newPagePromise = new Promise((resolve) => {
+            const timeout = setTimeout(() => resolve(null), 30000);
+            const handler = (newPage) => {
+              clearTimeout(timeout);
+              console.log(`[Documentatie] Nieuwe pagina geopend: ${newPage.url().substring(0, 100)}`);
+              resolve(newPage);
+            };
+            context.once('page', handler);
           });
+
+          // Luister ook op PDF responses op ALLE pagina's
+          const responseHandler = async (response) => {
+            try {
+              const contentType = response.headers()['content-type'] || '';
+              const url = response.url();
+              if (contentType.includes('pdf') || url.includes('synthesePE')) {
+                console.log(`[Documentatie] PDF response: ${url.substring(0, 100)} (${contentType})`);
+                try {
+                  pdfBuffer = await response.body();
+                  console.log(`[Documentatie] PDF buffer: ${pdfBuffer.length} bytes`);
+                } catch (e) {
+                  console.log(`[Documentatie] Kon PDF body niet lezen: ${e.message.substring(0, 80)}`);
+                }
+              }
+            } catch (e) { /* ignore */ }
+          };
+          // Registreer op alle bestaande pagina's
+          for (const p of context.pages()) {
+            p.on('response', responseHandler);
+          }
 
           await searchBtn.click();
           console.log('[Documentatie] Wachten op PDF...');
 
-          const pdfResult = await pdfPromise;
+          // Wacht op de nieuwe pagina (formSubmitForward)
+          pdfNewPage = await newPagePromise;
 
-          if (!pdfResult) {
-            console.log('[Documentatie] Geen PDF ontvangen binnen timeout');
-            return null;
+          if (pdfNewPage) {
+            // Nieuwe pagina geopend — wacht tot deze klaar is met navigeren
+            // formSubmitForward → redirect naar synthesePE.do
+            console.log(`[Documentatie] Nieuwe pagina URL: ${pdfNewPage.url().substring(0, 100)}`);
+
+            // Registreer response handler ook op de nieuwe pagina
+            pdfNewPage.on('response', responseHandler);
+
+            // Wacht op networkidle (redirect volgen)
+            await pdfNewPage.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+            console.log(`[Documentatie] Pagina na laden: ${pdfNewPage.url().substring(0, 100)}`);
+
+            // Als we nog geen PDF buffer hebben, probeer de huidige URL
+            if (!pdfBuffer) {
+              const finalUrl = pdfNewPage.url();
+              console.log(`[Documentatie] Geen PDF via response interceptie, probeer pagina URL: ${finalUrl.substring(0, 100)}`);
+
+              // Probeer de response van de huidige navigatie
+              try {
+                // Herlaad de pagina en vang de response op
+                const resp = await pdfNewPage.reload({ waitUntil: 'load', timeout: 15000 });
+                if (resp) {
+                  const contentType = resp.headers()['content-type'] || '';
+                  console.log(`[Documentatie] Reload response content-type: ${contentType}`);
+                  if (contentType.includes('pdf')) {
+                    pdfBuffer = await resp.body();
+                    console.log(`[Documentatie] PDF via reload: ${pdfBuffer.length} bytes`);
+                  }
+                }
+              } catch (e) {
+                console.log(`[Documentatie] Reload mislukt: ${e.message.substring(0, 80)}`);
+              }
+
+              // Fallback: fetch de URL via een nieuwe pagina request
+              if (!pdfBuffer && (finalUrl.includes('synthesePE') || finalUrl.includes('docapvpr'))) {
+                try {
+                  const fetchPage = await context.newPage();
+                  const resp = await fetchPage.goto(finalUrl, { waitUntil: 'load', timeout: 15000 });
+                  if (resp) {
+                    const ct = resp.headers()['content-type'] || '';
+                    console.log(`[Documentatie] Fetch content-type: ${ct}`);
+                    pdfBuffer = await resp.body();
+                    console.log(`[Documentatie] PDF via fetch: ${pdfBuffer.length} bytes`);
+                  }
+                  await fetchPage.close().catch(() => {});
+                } catch (e) {
+                  console.log(`[Documentatie] Fetch mislukt: ${e.message.substring(0, 80)}`);
+                }
+              }
+            }
+
+            // Sluit de PDF pagina
+            await pdfNewPage.close().catch(() => {});
           }
 
-          // Parse de PDF
-          let pdfBuffer;
-          if (pdfResult.buffer) {
-            // Direct response buffer
-            pdfBuffer = pdfResult.buffer;
-            console.log(`[Documentatie] PDF buffer ontvangen (${pdfBuffer.length} bytes) van ${pdfResult.url.substring(0, 80)}`);
-          } else if (pdfResult.url) {
-            // Nieuwe pagina met PDF URL — fetch de PDF
-            try {
-              const pdfUrl = pdfResult.url();
-              console.log(`[Documentatie] PDF pagina: ${pdfUrl.substring(0, 100)}`);
-              // Gebruik de context cookies om de PDF op te halen
-              const response = await pdfResult.goto(pdfUrl, { waitUntil: 'load', timeout: 15000 });
-              if (response) {
-                pdfBuffer = await response.body();
-                console.log(`[Documentatie] PDF gedownload: ${pdfBuffer.length} bytes`);
-              }
-              await pdfResult.close().catch(() => {});
-            } catch (e) {
-              console.log(`[Documentatie] PDF downloaden mislukt: ${e.message.substring(0, 100)}`);
-              // Probeer via de pagina tekst te lezen (soms toont browser PDF als tekst)
-              try {
-                const text = await pdfResult.evaluate(() => document.body?.innerText || '');
-                if (text.length > 100) {
-                  console.log(`[Documentatie] Pagina tekst (${text.length} chars): ${text.substring(0, 300)}`);
-                  return parsePdfText(text);
-                }
-              } catch (e2) { /* ignore */ }
-              await pdfResult.close().catch(() => {});
-              return null;
-            }
-          } else {
-            console.log('[Documentatie] Onverwacht PDF resultaat type');
+          // Cleanup response handlers
+          for (const p of context.pages()) {
+            p.removeListener('response', responseHandler);
+          }
+
+          // Wacht nog even voor late responses
+          if (!pdfBuffer) {
+            await docPage.waitForTimeout(3000);
+          }
+
+          if (!pdfBuffer) {
+            console.log('[Documentatie] Geen PDF ontvangen');
             return null;
           }
 
