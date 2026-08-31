@@ -1011,12 +1011,12 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
         // 3. Fetch PDF bytes via context.request.get (deelt cookies met browser)
         let pdfBuffer = null;
 
-        // Wacht op nieuwe pagina (popup) — op Railway duurt dit tot 120s!
+        // Wacht op nieuwe pagina (popup) — op Railway duurt dit 100-150s!
         const pdfPagePromise = new Promise((resolve) => {
           const timeout = setTimeout(() => {
-            console.log('[Documentatie] Geen popup na 150s');
+            console.log('[Documentatie] Geen popup na 240s');
             resolve(null);
-          }, 150000);
+          }, 240000);
           context.once('page', (newPage) => {
             clearTimeout(timeout);
             console.log(`[Documentatie] Popup geopend na ${Math.round((Date.now() - searchStart) / 1000)}s: ${newPage.url()}`);
@@ -1025,7 +1025,7 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
         });
         await searchBtn.click();
         const searchStart = Date.now();
-        console.log('[Documentatie] Zoeken geklikt, wachten op popup (max 150s)...');
+        console.log('[Documentatie] Zoeken geklikt, wachten op popup (max 240s)...');
 
         const pdfPage = await pdfPagePromise;
 
