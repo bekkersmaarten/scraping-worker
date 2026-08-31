@@ -826,33 +826,25 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
   console.log('[Documentatie] Start frequentie-extractie via Onderhoudsschema PDF...');
 
   try {
-    // ── STAP 1: Navigeer naar Technische documentatie ──
-    // De DOCUMENTATIE tab heeft een submenu dat verschijnt bij hover
-    let techDocClicked = false;
+    // Gebruik de hoofdpagina — documentatie opent in een frame, niet een apart venster
+    const docPage = page;
 
-    for (const frame of page.frames()) {
+    // ── STAP 1: Navigeer naar Technische documentatie ──
+    let techDocClicked = false;
+    for (const frame of docPage.frames()) {
       try {
-        // Zoek DOCUMENTATIE menu-item en hover
-        const docTab = await frame.$('a:has-text("DOCUMENTATIE"), a:has-text("Documentatie"), span:has-text("DOCUMENTATIE")');
+        const docTab = await frame.$('a:has-text("DOCUMENTATIE"), a:has-text("Documentatie")');
         if (docTab) {
           console.log('[Documentatie] DOCUMENTATIE tab gevonden, hover...');
           await docTab.hover();
-          await frame.waitForTimeout(1000);
+          await frame.waitForTimeout(1500);
 
-          // Zoek "Technische documentatie" in het submenu
-          const techDoc = await frame.$('a:has-text("Technische documentatie"), a:has-text("Technical documentation")');
-          if (techDoc) {
-            console.log('[Documentatie] Technische documentatie link gevonden, klikken...');
-            await techDoc.click();
-            techDocClicked = true;
-            break;
-          }
-
-          // Fallback: zoek in hele pagina na hover
-          for (const f2 of page.frames()) {
-            const techDoc2 = await f2.$('a:has-text("Technische documentatie"), a:has-text("Technical documentation")');
-            if (techDoc2) {
-              await techDoc2.click();
+          // Zoek submenu in alle frames (submenu kan in ander frame zitten)
+          for (const f2 of docPage.frames()) {
+            const techDoc = await f2.$('a:has-text("Technische documentatie")');
+            if (techDoc) {
+              console.log('[Documentatie] Technische documentatie gevonden, klikken...');
+              await techDoc.click();
               techDocClicked = true;
               break;
             }
@@ -862,150 +854,69 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
       } catch (e) { continue; }
     }
 
-    // Fallback: probeer goTo als beschikbaar
-    if (!techDocClicked) {
-      for (const frame of page.frames()) {
-        try {
-          const hasGoTo = await frame.evaluate(() => typeof goTo === 'function');
-          if (hasGoTo) {
-            // Probeer bekende documentatie-paden
-            for (const path of ['/docapvpr/', '/doc/', '/documentation/']) {
-              try {
-                await frame.evaluate((p) => goTo(p), path);
-                techDocClicked = true;
-                console.log(`[Documentatie] goTo('${path}') uitgevoerd`);
-                break;
-              } catch (e) { continue; }
-            }
-            if (techDocClicked) break;
-          }
-        } catch (e) { continue; }
-      }
-    }
-
     if (!techDocClicked) {
       console.log('[Documentatie] Kon Technische documentatie niet bereiken');
       return null;
     }
 
-    await page.waitForTimeout(3000);
-
-    // Zoek de documentatie pagina (kan in nieuw venster of in bestaande frame zijn)
-    let docPage = null;
-    const allPages = context.pages();
-    for (const p of allPages) {
-      const url = p.url();
-      if (url.includes('docapvpr') || url.includes('documentation') || url.includes('/doc/')) {
-        docPage = p;
-        break;
-      }
-    }
-
-    // Als geen nieuwe pagina, gebruik de hoofdpagina (documentatie opent in frame)
-    if (!docPage) docPage = page;
-    console.log(`[Documentatie] Documentatie pagina: ${docPage.url().substring(0, 100)}`);
+    await docPage.waitForTimeout(3000);
     await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    console.log('[Documentatie] Technische documentatie geladen');
 
     // ── STAP 2: VIN invoeren en OK klikken ──
+    // Het VIN veld is input#short-vin (type="search") en de OK knop is input[type="image"][name="VIN_OK_BUTTON"]
     let vinEntered = false;
     for (const frame of docPage.frames()) {
       try {
-        // Zoek ALLE text inputs (docapvpr gebruikt soms generieke input velden)
-        const vinInput = await frame.$('input[name*="vin" i], input[name*="chassis" i], input[id*="vin" i], input[id*="chassis" i], input[name*="short" i], input#short-vin');
+        const vinInput = await frame.$('input#short-vin, input[name="shortvin"]');
         if (vinInput) {
+          // Veld leegmaken en VIN invullen
+          await vinInput.click();
+          await vinInput.fill('');
           await vinInput.fill(vin);
-          console.log(`[Documentatie] VIN ingevuld: ${vin}`);
+          console.log(`[Documentatie] VIN ingevuld in short-vin: ${vin}`);
 
-          // Brede OK/submit knop detectie
-          const okSelectors = [
-            'input[type="submit"]',
-            'button[type="submit"]',
-            'input[value="OK"]', 'input[value="Ok"]', 'input[value="ok"]',
-            'button:has-text("OK")', 'button:has-text("Zoeken")', 'button:has-text("Search")',
-            'input[value*="Zoek"]', 'input[value*="Search"]', 'input[value*="Valid"]',
-            'a:has-text("OK")', 'a.button:has-text("OK")',
-            'input[type="button"][value="OK"]'
-          ];
-          let okClicked = false;
-          for (const sel of okSelectors) {
-            const okBtn = await frame.$(sel);
-            if (okBtn) {
-              const btnText = await okBtn.evaluate(el => el.value || el.textContent || '').catch(() => '');
-              console.log(`[Documentatie] OK knop gevonden via "${sel}": "${btnText.trim().substring(0, 30)}"`);
-              await okBtn.click();
-              okClicked = true;
-              break;
-            }
+          // OK knop is input[type="image"] met name="VIN_OK_BUTTON"
+          const okBtn = await frame.$('input[name="VIN_OK_BUTTON"], input[type="image"]');
+          if (okBtn) {
+            console.log('[Documentatie] VIN_OK_BUTTON gevonden, klikken...');
+            await okBtn.click();
+            vinEntered = true;
+          } else {
+            // Fallback: Enter toets
+            console.log('[Documentatie] Geen image button, probeer Enter...');
+            await vinInput.press('Enter');
+            vinEntered = true;
           }
 
-          if (okClicked) {
-            vinEntered = true;
-            console.log('[Documentatie] OK geklikt, wachten op laden...');
-            await docPage.waitForTimeout(3000);
+          if (vinEntered) {
+            console.log('[Documentatie] VIN verstuurd, wachten op laden...');
+            await docPage.waitForTimeout(5000);
             await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-          } else {
-            console.log('[Documentatie] VIN ingevuld maar OK knop niet gevonden');
-            // Log alle knoppen/inputs in dit frame
-            const btns = await frame.evaluate(() =>
-              Array.from(document.querySelectorAll('input[type="submit"], input[type="button"], button, a.button')).map(el => ({
-                tag: el.tagName, type: el.type, value: el.value, text: el.textContent?.trim()?.substring(0, 30)
-              }))
-            );
-            console.log(`[Documentatie] Beschikbare knoppen: ${JSON.stringify(btns)}`);
-
-            // Probeer form submit als fallback
-            const submitted = await frame.evaluate(() => {
-              const form = document.querySelector('form');
-              if (form) { form.submit(); return true; }
-              return false;
-            });
-            if (submitted) {
-              vinEntered = true;
-              console.log('[Documentatie] Formulier direct gesubmit (form.submit())');
-              await docPage.waitForTimeout(3000);
-              await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-            }
           }
           break;
         }
       } catch (e) { continue; }
     }
 
-    // Als geen VIN input gevonden, log wat er wél op de pagina staat
     if (!vinEntered) {
-      console.log('[Documentatie] VIN niet ingevoerd — probeer toch door te gaan (voertuig mogelijk al geselecteerd)');
-      for (const frame of docPage.frames()) {
-        try {
-          const inputs = await frame.evaluate(() =>
-            Array.from(document.querySelectorAll('input:not([type="hidden"])')).map(el => ({
-              name: el.name, id: el.id, type: el.type, value: el.value?.substring(0, 30), placeholder: el.placeholder
-            })).slice(0, 10)
-          );
-          if (inputs.length > 0) console.log(`[Documentatie] Inputs in frame: ${JSON.stringify(inputs)}`);
-        } catch (e) { continue; }
-      }
+      console.log('[Documentatie] VIN veld niet gevonden');
+      return null;
     }
 
     // ── STAP 3: Klik Onderhoudsschema's ──
     let schemaClicked = false;
     for (const frame of docPage.frames()) {
       try {
-        const schemaLink = await frame.$('a:has-text("Onderhoudsschema"), button:has-text("Onderhoudsschema"), a:has-text("Maintenance schedule"), span:has-text("Onderhoudsschema")');
+        const schemaLink = await frame.$('a:has-text("Onderhoudsschema")');
         if (schemaLink) {
           const linkText = await schemaLink.evaluate(el => el.textContent?.trim()?.substring(0, 50));
           console.log(`[Documentatie] Onderhoudsschema's link gevonden: "${linkText}"`);
           await schemaLink.click();
           schemaClicked = true;
-          console.log('[Documentatie] Onderhoudsschema\'s geklikt, wachten op navigatie...');
+          console.log('[Documentatie] Onderhoudsschema\'s geklikt, wachten...');
           await docPage.waitForTimeout(5000);
           await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-          // Na klik: log wat de frames nu tonen
-          for (const f of docPage.frames()) {
-            try {
-              const txt = await f.evaluate(() => document.body?.innerText?.substring(0, 200) || '');
-              if (txt.length > 20) console.log(`[Documentatie] Frame na schema-klik: ${f.url().substring(0, 60)} → ${txt.substring(0, 120)}`);
-            } catch (e) { /* ignore */ }
-          }
           break;
         }
       } catch (e) { continue; }
@@ -1013,11 +924,11 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
 
     if (!schemaClicked) {
       console.log('[Documentatie] Onderhoudsschema\'s link niet gevonden');
-      // Log beschikbare links voor debugging
+      // Log beschikbare links
       for (const frame of docPage.frames()) {
         try {
           const links = await frame.evaluate(() =>
-            Array.from(document.querySelectorAll('a, button')).map(el => el.textContent?.trim()).filter(t => t && t.length > 2).slice(0, 20)
+            Array.from(document.querySelectorAll('a')).map(el => el.textContent?.trim()).filter(t => t && t.length > 2).slice(0, 20)
           );
           if (links.length > 0) console.log(`[Documentatie] Beschikbare links: ${links.join(', ')}`);
         } catch (e) { continue; }
@@ -1026,38 +937,53 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
     }
 
     // ── STAP 4: Selecteer tab "Overzicht onderhoud" ──
-    let overzichtFound = false;
+    let overzichtClicked = false;
     for (const frame of docPage.frames()) {
       try {
-        const overzichtTab = await frame.$('a:has-text("Overzicht onderhoud"), button:has-text("Overzicht onderhoud"), [role="tab"]:has-text("Overzicht"), a:has-text("Maintenance overview")');
+        // De tab kan elk element-type zijn (a, td, div, span, etc.)
+        const overzichtTab = await frame.$('a:has-text("Overzicht onderhoud"), td:has-text("Overzicht onderhoud"), div:has-text("Overzicht onderhoud"), span:has-text("Overzicht onderhoud"), *:has-text("Overzicht onderhoud")');
         if (overzichtTab) {
           console.log('[Documentatie] Tab "Overzicht onderhoud" gevonden, klikken...');
           await overzichtTab.click();
-          overzichtFound = true;
-          await docPage.waitForTimeout(2000);
+          overzichtClicked = true;
+          await docPage.waitForTimeout(3000);
+          await docPage.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
           break;
         }
       } catch (e) { continue; }
     }
-    if (!overzichtFound) {
-      console.log('[Documentatie] Tab "Overzicht onderhoud" niet gevonden, probeer toch door te gaan...');
-      // Log beschikbare tabs/links voor debugging
+    // Fallback: zoek via JavaScript in alle frames
+    if (!overzichtClicked) {
       for (const frame of docPage.frames()) {
         try {
-          const items = await frame.evaluate(() =>
-            Array.from(document.querySelectorAll('a, button, [role="tab"], li')).map(el => el.textContent?.trim()).filter(t => t && t.length > 1 && t.length < 60).slice(0, 25)
-          );
-          if (items.length > 0) console.log(`[Documentatie] Beschikbare items in frame: ${items.join(' | ')}`);
+          const clicked = await frame.evaluate(() => {
+            const els = document.querySelectorAll('a, td, div, span, li, button');
+            for (const el of els) {
+              if (el.textContent?.trim() === 'Overzicht onderhoud' || el.innerText?.trim() === 'Overzicht onderhoud') {
+                el.click();
+                return true;
+              }
+            }
+            return false;
+          });
+          if (clicked) {
+            console.log('[Documentatie] Tab "Overzicht onderhoud" geklikt via JS');
+            overzichtClicked = true;
+            await docPage.waitForTimeout(3000);
+            await docPage.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+            break;
+          }
         } catch (e) { continue; }
       }
     }
+    if (!overzichtClicked) {
+      console.log('[Documentatie] Tab "Overzicht onderhoud" niet gevonden');
+    }
 
-    // ── STAP 5: Dropdown Gebruiksomstandigheden → Normaal, klik Zoeken ──
-    let dropdownFound = false;
-    let searchBtnFound = false;
+    // ── STAP 5: Dropdown Normaal + Zoeken → PDF ──
     for (const frame of docPage.frames()) {
       try {
-        // Zoek dropdown met gebruiksomstandigheden
+        // Zoek dropdown met "Normaal" optie
         const selects = await frame.$$('select');
         for (const select of selects) {
           const options = await select.evaluate(el =>
@@ -1065,144 +991,108 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
           );
           const normaalOpt = options.find(o => /normaa?l/i.test(o.text));
           if (normaalOpt) {
-            console.log(`[Documentatie] Dropdown gevonden met Normaal optie: "${normaalOpt.text}" (value: ${normaalOpt.value})`);
+            console.log(`[Documentatie] Dropdown Normaal: "${normaalOpt.text}" (${normaalOpt.value})`);
             await select.selectOption(normaalOpt.value);
-            dropdownFound = true;
             await frame.waitForTimeout(500);
             break;
-          } else if (options.length > 0) {
-            console.log(`[Documentatie] Select gevonden maar geen Normaal optie. Opties: ${options.map(o => o.text).join(', ')}`);
           }
         }
 
-        // Klik Zoeken
-        const searchBtn = await frame.$('button:has-text("Zoeken"), input[value*="Zoek"], button:has-text("Search"), input[value="OK"]');
-        if (searchBtn) {
-          console.log('[Documentatie] Zoeken knop klikken...');
+        // Zoek Zoeken knop — specifiek #btnRechercher (niet de verborgen top-bar "Rechercher")
+        const searchBtn = await frame.$('input#btnRechercher, input[value="Zoeken"][type="button"]');
+        if (!searchBtn) continue;
 
-          // Setup PDF interceptie VOORDAT we klikken
-          // Na "Zoeken" opent formSubmitForward → redirect naar synthesePE.do (PDF)
-          let pdfBuffer = null;
-          let pdfNewPage = null;
+        const btnInfo = await searchBtn.evaluate(el => `${el.tagName} type=${el.type} value="${el.value}" id="${el.id}"`);
+        console.log(`[Documentatie] Zoeken knop: ${btnInfo}`);
 
-          // Luister op ELKE nieuwe pagina (niet filteren op URL — formSubmitForward redirect)
-          const newPagePromise = new Promise((resolve) => {
-            const timeout = setTimeout(() => resolve(null), 45000);
-            const handler = (newPage) => {
-              clearTimeout(timeout);
-              console.log(`[Documentatie] Nieuwe pagina geopend: ${newPage.url().substring(0, 100)}`);
-              resolve(newPage);
-            };
-            context.once('page', handler);
-          });
+        // Setup PDF interceptie
+        let pdfBuffer = null;
 
-          // Luister ook op PDF responses op ALLE pagina's
-          const responseHandler = async (response) => {
-            try {
-              const contentType = response.headers()['content-type'] || '';
-              const url = response.url();
-              if (contentType.includes('pdf') || url.includes('synthesePE')) {
-                console.log(`[Documentatie] PDF response: ${url.substring(0, 100)} (${contentType})`);
-                try {
-                  pdfBuffer = await response.body();
-                  console.log(`[Documentatie] PDF buffer: ${pdfBuffer.length} bytes`);
-                } catch (e) {
-                  console.log(`[Documentatie] Kon PDF body niet lezen: ${e.message.substring(0, 80)}`);
-                }
-              }
-            } catch (e) { /* ignore */ }
-          };
-          // Registreer op alle bestaande pagina's
-          for (const p of context.pages()) {
-            p.on('response', responseHandler);
-          }
-
-          await searchBtn.click();
-          console.log('[Documentatie] Wachten op PDF...');
-
-          // Wacht op de nieuwe pagina (formSubmitForward)
-          pdfNewPage = await newPagePromise;
-
-          if (pdfNewPage) {
-            // Nieuwe pagina geopend — wacht tot deze klaar is met navigeren
-            // formSubmitForward → redirect naar synthesePE.do
-            console.log(`[Documentatie] Nieuwe pagina URL: ${pdfNewPage.url().substring(0, 100)}`);
-
-            // Registreer response handler ook op de nieuwe pagina
-            pdfNewPage.on('response', responseHandler);
-
-            // Wacht op networkidle (redirect volgen)
-            await pdfNewPage.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-            console.log(`[Documentatie] Pagina na laden: ${pdfNewPage.url().substring(0, 100)}`);
-
-            // Als we nog geen PDF buffer hebben, probeer de huidige URL
-            if (!pdfBuffer) {
-              const finalUrl = pdfNewPage.url();
-              console.log(`[Documentatie] Geen PDF via response interceptie, probeer pagina URL: ${finalUrl.substring(0, 100)}`);
-
-              // Probeer de response van de huidige navigatie
+        const responseHandler = async (response) => {
+          try {
+            const ct = response.headers()['content-type'] || '';
+            const url = response.url();
+            if (ct.includes('pdf') || url.includes('synthesePE')) {
+              console.log(`[Documentatie] PDF response: ${url.substring(0, 100)} (${ct})`);
               try {
-                // Herlaad de pagina en vang de response op
-                const resp = await pdfNewPage.reload({ waitUntil: 'load', timeout: 15000 });
-                if (resp) {
-                  const contentType = resp.headers()['content-type'] || '';
-                  console.log(`[Documentatie] Reload response content-type: ${contentType}`);
-                  if (contentType.includes('pdf')) {
-                    pdfBuffer = await resp.body();
-                    console.log(`[Documentatie] PDF via reload: ${pdfBuffer.length} bytes`);
-                  }
-                }
+                pdfBuffer = await response.body();
+                console.log(`[Documentatie] PDF buffer: ${pdfBuffer.length} bytes`);
               } catch (e) {
-                console.log(`[Documentatie] Reload mislukt: ${e.message.substring(0, 80)}`);
-              }
-
-              // Fallback: fetch de URL via een nieuwe pagina request
-              if (!pdfBuffer && (finalUrl.includes('synthesePE') || finalUrl.includes('docapvpr'))) {
-                try {
-                  const fetchPage = await context.newPage();
-                  const resp = await fetchPage.goto(finalUrl, { waitUntil: 'load', timeout: 15000 });
-                  if (resp) {
-                    const ct = resp.headers()['content-type'] || '';
-                    console.log(`[Documentatie] Fetch content-type: ${ct}`);
-                    pdfBuffer = await resp.body();
-                    console.log(`[Documentatie] PDF via fetch: ${pdfBuffer.length} bytes`);
-                  }
-                  await fetchPage.close().catch(() => {});
-                } catch (e) {
-                  console.log(`[Documentatie] Fetch mislukt: ${e.message.substring(0, 80)}`);
-                }
+                console.log(`[Documentatie] Kon PDF body niet lezen: ${e.message.substring(0, 80)}`);
               }
             }
+          } catch (e) { /* ignore */ }
+        };
 
-            // Sluit de PDF pagina
-            await pdfNewPage.close().catch(() => {});
-          }
+        // Registreer response handler op alle pagina's
+        for (const p of context.pages()) {
+          p.on('response', responseHandler);
+        }
 
-          // Cleanup response handlers
-          for (const p of context.pages()) {
-            p.removeListener('response', responseHandler);
-          }
+        // Luister op nieuwe pagina (PDF opent soms in nieuw venster)
+        const newPagePromise = new Promise((resolve) => {
+          const timeout = setTimeout(() => resolve(null), 30000);
+          context.once('page', (newPage) => {
+            clearTimeout(timeout);
+            console.log(`[Documentatie] Nieuwe pagina: ${newPage.url().substring(0, 100)}`);
+            newPage.on('response', responseHandler);
+            resolve(newPage);
+          });
+        });
 
-          // Wacht nog even voor late responses
+        await searchBtn.click();
+        console.log('[Documentatie] Zoeken geklikt, wachten op PDF...');
+
+        // Wacht op nieuwe pagina
+        const pdfPage = await newPagePromise;
+
+        if (pdfPage) {
+          await pdfPage.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+          console.log(`[Documentatie] PDF pagina URL: ${pdfPage.url().substring(0, 100)}`);
+
+          // Als geen PDF buffer via response, probeer reload
           if (!pdfBuffer) {
-            await docPage.waitForTimeout(3000);
+            try {
+              const resp = await pdfPage.reload({ waitUntil: 'load', timeout: 15000 });
+              if (resp) {
+                const ct = resp.headers()['content-type'] || '';
+                if (ct.includes('pdf')) {
+                  pdfBuffer = await resp.body();
+                  console.log(`[Documentatie] PDF via reload: ${pdfBuffer.length} bytes`);
+                }
+              }
+            } catch (e) {
+              console.log(`[Documentatie] Reload mislukt: ${e.message.substring(0, 80)}`);
+            }
           }
 
-          if (!pdfBuffer) {
-            console.log('[Documentatie] Geen PDF ontvangen');
-            return null;
-          }
+          await pdfPage.close().catch(() => {});
+        }
 
-          // Parse PDF met pdf-parse
-          try {
-            const pdfData = await pdfParse(pdfBuffer);
-            console.log(`[Documentatie] PDF geparsed: ${pdfData.numpages} pagina's, ${pdfData.text.length} chars`);
-            console.log(`[Documentatie] PDF tekst (eerste 500): ${pdfData.text.substring(0, 500)}`);
-            return parsePdfText(pdfData.text);
-          } catch (parseErr) {
-            console.log(`[Documentatie] PDF parse fout: ${parseErr.message.substring(0, 100)}`);
-            return null;
-          }
+        // Cleanup
+        for (const p of context.pages()) {
+          p.removeListener('response', responseHandler);
+        }
+
+        if (!pdfBuffer) {
+          // Wacht nog even
+          await docPage.waitForTimeout(5000);
+        }
+
+        if (!pdfBuffer) {
+          console.log('[Documentatie] Geen PDF ontvangen');
+          return null;
+        }
+
+        // Parse PDF
+        try {
+          const pdfData = await pdfParse(pdfBuffer);
+          console.log(`[Documentatie] PDF geparsed: ${pdfData.numpages} pagina's, ${pdfData.text.length} chars`);
+          console.log(`[Documentatie] PDF tekst (eerste 500): ${pdfData.text.substring(0, 500)}`);
+          return parsePdfText(pdfData.text);
+        } catch (parseErr) {
+          console.log(`[Documentatie] PDF parse fout: ${parseErr.message.substring(0, 100)}`);
+          return null;
         }
       } catch (e) {
         console.log(`[Documentatie] Frame error: ${e.message.substring(0, 100)}`);
