@@ -1005,99 +1005,59 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
         const btnInfo = await searchBtn.evaluate(el => `${el.tagName} type=${el.type} value="${el.value}" id="${el.id}"`);
         console.log(`[Documentatie] Zoeken knop: ${btnInfo}`);
 
-        // Setup PDF interceptie
+        // Setup PDF interceptie via context.route — onderschept op netwerkniveau
         let pdfBuffer = null;
+        let pdfRouteResolve;
+        const pdfRoutePromise = new Promise(resolve => { pdfRouteResolve = resolve; });
 
-        const responseHandler = async (response) => {
+        // Intercept synthesePE request op netwerkniveau (meest betrouwbaar)
+        const routeHandler = async (route) => {
+          console.log(`[Documentatie] Route intercept: ${route.request().url().substring(0, 100)}`);
           try {
+            const response = await route.fetch();
             const ct = response.headers()['content-type'] || '';
-            const url = response.url();
-            if (ct.includes('pdf') || url.includes('synthesePE')) {
-              console.log(`[Documentatie] PDF response: ${url.substring(0, 100)} (${ct})`);
-              try {
-                pdfBuffer = await response.body();
-                console.log(`[Documentatie] PDF buffer: ${pdfBuffer.length} bytes`);
-              } catch (e) {
-                console.log(`[Documentatie] Kon PDF body niet lezen: ${e.message.substring(0, 80)}`);
-              }
+            const body = await response.body();
+            console.log(`[Documentatie] Route response: ${ct}, ${body.length} bytes`);
+            if (ct.includes('pdf') || body.length > 1000) {
+              pdfBuffer = body;
+              console.log(`[Documentatie] PDF via route intercept: ${pdfBuffer.length} bytes`);
+              pdfRouteResolve(pdfBuffer);
             }
-          } catch (e) { /* ignore */ }
+            await route.fulfill({ response });
+          } catch (e) {
+            console.log(`[Documentatie] Route fetch fout: ${e.message.substring(0, 100)}`);
+            await route.continue().catch(() => {});
+            pdfRouteResolve(null);
+          }
         };
+        await context.route(/synthesePE/i, routeHandler);
 
-        // Registreer response handler op alle pagina's
-        for (const p of context.pages()) {
-          p.on('response', responseHandler);
-        }
-
-        // Luister op nieuwe pagina (PDF opent soms in nieuw venster)
+        // Luister ook op nieuwe pagina (om die netjes te sluiten)
         const newPagePromise = new Promise((resolve) => {
-          const timeout = setTimeout(() => resolve(null), 90000);
+          const timeout = setTimeout(() => resolve(null), 95000);
           context.once('page', (newPage) => {
             clearTimeout(timeout);
-            console.log(`[Documentatie] Nieuwe pagina: ${newPage.url().substring(0, 100)}`);
-            newPage.on('response', responseHandler);
+            console.log(`[Documentatie] Nieuwe pagina geopend: ${newPage.url()}`);
             resolve(newPage);
           });
         });
 
         await searchBtn.click();
-        console.log('[Documentatie] Zoeken geklikt, wachten op PDF...');
+        console.log('[Documentatie] Zoeken geklikt, wachten op PDF via route intercept...');
 
-        // Wacht op nieuwe pagina
-        const pdfPage = await newPagePromise;
+        // Wacht op PDF via route intercept (max 90s)
+        const timeoutPromise = new Promise(resolve => setTimeout(() => resolve(null), 90000));
+        await Promise.race([pdfRoutePromise, timeoutPromise]);
 
+        // Cleanup: route handler verwijderen en popup sluiten
+        await context.unroute(/synthesePE/i, routeHandler).catch(() => {});
+        const pdfPage = await Promise.race([newPagePromise, new Promise(r => setTimeout(() => r(null), 5000))]);
         if (pdfPage) {
-          console.log(`[Documentatie] Nieuwe pagina initial URL: ${pdfPage.url()}`);
-
-          // De pagina gaat: about:blank → formSubmitForward.do → synthesePE.do (PDF)
-          // Wacht tot we voorbij about:blank EN formSubmitForward zijn (= synthesePE of andere finale URL)
-          try {
-            await pdfPage.waitForURL(
-              url => {
-                const href = url.href || url.toString();
-                return href !== 'about:blank' && !href.includes('formSubmitForward');
-              },
-              { timeout: 90000 }
-            );
-            console.log(`[Documentatie] Finale URL bereikt: ${pdfPage.url().substring(0, 100)}`);
-            await pdfPage.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
-          } catch (e) {
-            console.log(`[Documentatie] URL timeout na 90s. Huidige URL: ${pdfPage.url().substring(0, 100)}`);
-          }
-
-          // Geef response handler even tijd om PDF body te capturen
-          if (!pdfBuffer) {
-            await pdfPage.waitForTimeout(3000);
-          }
-
-          // Fallback 1: reload als we op de PDF URL zitten maar body niet gevangen
-          if (!pdfBuffer && pdfPage.url() !== 'about:blank') {
-            try {
-              console.log(`[Documentatie] Geen PDF via response handler, probeer reload van ${pdfPage.url().substring(0, 80)}...`);
-              const resp = await pdfPage.reload({ waitUntil: 'load', timeout: 30000 });
-              if (resp) {
-                const ct = resp.headers()['content-type'] || '';
-                console.log(`[Documentatie] Reload content-type: ${ct}`);
-                if (ct.includes('pdf')) {
-                  pdfBuffer = await resp.body();
-                  console.log(`[Documentatie] PDF via reload: ${pdfBuffer.length} bytes`);
-                }
-              }
-            } catch (e) {
-              console.log(`[Documentatie] Reload mislukt: ${e.message.substring(0, 80)}`);
-            }
-          }
-
           await pdfPage.close().catch(() => {});
         }
 
-        // Cleanup
-        for (const p of context.pages()) {
-          p.removeListener('response', responseHandler);
-        }
-
         if (!pdfBuffer) {
-          console.log('[Documentatie] Geen PDF ontvangen');
+          console.log('[Documentatie] Geen PDF ontvangen via route intercept');
           return null;
         }
 
