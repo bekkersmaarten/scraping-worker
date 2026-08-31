@@ -1031,7 +1031,7 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
 
         // Luister op nieuwe pagina (PDF opent soms in nieuw venster)
         const newPagePromise = new Promise((resolve) => {
-          const timeout = setTimeout(() => resolve(null), 30000);
+          const timeout = setTimeout(() => resolve(null), 90000);
           context.once('page', (newPage) => {
             clearTimeout(timeout);
             console.log(`[Documentatie] Nieuwe pagina: ${newPage.url().substring(0, 100)}`);
@@ -1047,15 +1047,35 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
         const pdfPage = await newPagePromise;
 
         if (pdfPage) {
-          await pdfPage.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+          // Wacht tot pagina initieel geladen is
+          await pdfPage.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
           console.log(`[Documentatie] PDF pagina URL: ${pdfPage.url().substring(0, 100)}`);
 
-          // Als geen PDF buffer via response, probeer reload
-          if (!pdfBuffer) {
+          // formSubmitForward redirect naar synthesePE.do — wacht tot URL verandert
+          if (pdfPage.url().includes('formSubmitForward')) {
+            console.log('[Documentatie] Nog op formSubmitForward, wachten op redirect naar synthesePE...');
             try {
-              const resp = await pdfPage.reload({ waitUntil: 'load', timeout: 15000 });
+              await pdfPage.waitForURL(url => !url.toString().includes('formSubmitForward'), { timeout: 60000 });
+              console.log(`[Documentatie] URL na redirect: ${pdfPage.url().substring(0, 100)}`);
+              await pdfPage.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
+            } catch (e) {
+              console.log(`[Documentatie] Redirect timeout: ${e.message.substring(0, 80)}`);
+            }
+          }
+
+          // Geef response handler even tijd om PDF body te capturen
+          if (!pdfBuffer) {
+            await pdfPage.waitForTimeout(3000);
+          }
+
+          // Fallback 1: reload als URL synthesePE is maar body niet gevangen
+          if (!pdfBuffer && pdfPage.url().includes('synthesePE')) {
+            try {
+              console.log('[Documentatie] Geen PDF via response, probeer reload...');
+              const resp = await pdfPage.reload({ waitUntil: 'load', timeout: 30000 });
               if (resp) {
                 const ct = resp.headers()['content-type'] || '';
+                console.log(`[Documentatie] Reload content-type: ${ct}`);
                 if (ct.includes('pdf')) {
                   pdfBuffer = await resp.body();
                   console.log(`[Documentatie] PDF via reload: ${pdfBuffer.length} bytes`);
@@ -1066,17 +1086,29 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
             }
           }
 
+          // Fallback 2: navigeer opnieuw naar de PDF URL
+          if (!pdfBuffer && (pdfPage.url().includes('synthesePE') || pdfPage.url().includes('.pdf'))) {
+            try {
+              console.log('[Documentatie] Laatste poging: navigeer opnieuw naar PDF URL...');
+              const resp = await pdfPage.goto(pdfPage.url(), { waitUntil: 'load', timeout: 30000 });
+              if (resp) {
+                const ct = resp.headers()['content-type'] || '';
+                if (ct.includes('pdf')) {
+                  pdfBuffer = await resp.body();
+                  console.log(`[Documentatie] PDF via goto: ${pdfBuffer.length} bytes`);
+                }
+              }
+            } catch (e) {
+              console.log(`[Documentatie] Goto mislukt: ${e.message.substring(0, 80)}`);
+            }
+          }
+
           await pdfPage.close().catch(() => {});
         }
 
         // Cleanup
         for (const p of context.pages()) {
           p.removeListener('response', responseHandler);
-        }
-
-        if (!pdfBuffer) {
-          // Wacht nog even
-          await docPage.waitForTimeout(5000);
         }
 
         if (!pdfBuffer) {
