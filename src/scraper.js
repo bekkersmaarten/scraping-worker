@@ -1005,90 +1005,101 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
         const btnInfo = await searchBtn.evaluate(el => `${el.tagName} type=${el.type} value="${el.value}" id="${el.id}"`);
         console.log(`[Documentatie] Zoeken knop: ${btnInfo}`);
 
-        // ── PDF ophalen: simpele aanpak ──
-        // 1. Klik Zoeken → popup opent (about:blank → formSubmitForward → synthesePE.do)
-        // 2. Poll tot URL synthesePE bereikt
-        // 3. Fetch PDF bytes via context.request.get (deelt cookies met browser)
+        // ── PDF ophalen via directe HTTP request (geen browser popup) ──
+        // De browser popup duurt 150-240s op Railway. In plaats daarvan:
+        // 1. Extract form action + data uit de pagina
+        // 2. POST via context.request (deelt cookies met browser)
+        // 3. Volg redirect van formSubmitForward → synthesePE.do
         let pdfBuffer = null;
 
-        // Wacht op nieuwe pagina (popup) — op Railway duurt dit 100-150s!
-        const pdfPagePromise = new Promise((resolve) => {
-          const timeout = setTimeout(() => {
-            console.log('[Documentatie] Geen popup na 240s');
-            resolve(null);
-          }, 240000);
-          context.once('page', (newPage) => {
-            clearTimeout(timeout);
-            console.log(`[Documentatie] Popup geopend na ${Math.round((Date.now() - searchStart) / 1000)}s: ${newPage.url()}`);
-            resolve(newPage);
-          });
+        // Stap A: Extract form info
+        const formInfo = await frame.evaluate(() => {
+          const btn = document.getElementById('btnRechercher');
+          const form = btn ? btn.closest('form') : null;
+          if (!form) return null;
+          const data = {};
+          const inputs = form.querySelectorAll('input, select, textarea');
+          for (const inp of inputs) {
+            if (inp.name) {
+              if (inp.type === 'checkbox' || inp.type === 'radio') {
+                if (inp.checked) data[inp.name] = inp.value || 'on';
+              } else if (inp.type !== 'image' && inp.type !== 'button') {
+                data[inp.name] = inp.value || '';
+              }
+            }
+          }
+          return {
+            action: form.action || form.getAttribute('action'),
+            method: (form.method || 'POST').toUpperCase(),
+            data
+          };
         });
-        await searchBtn.click();
-        const searchStart = Date.now();
-        console.log('[Documentatie] Zoeken geklikt, wachten op popup (max 240s)...');
 
-        const pdfPage = await pdfPagePromise;
+        if (!formInfo) {
+          console.log('[Documentatie] Kon form data niet extraheren');
+          continue;
+        }
 
-        if (pdfPage) {
-          // Poll tot URL voorbij about:blank en formSubmitForward is (max 120s)
-          const pollStart = Date.now();
-          let finalUrl = '';
-          while (Date.now() - pollStart < 120000) {
-            try {
-              finalUrl = pdfPage.url();
-            } catch (e) {
-              console.log('[Documentatie] Pagina gesloten tijdens wachten');
-              break;
-            }
-            if (finalUrl.includes('synthesePE')) {
-              console.log(`[Documentatie] synthesePE bereikt na ${Math.round((Date.now() - pollStart) / 1000)}s`);
-              break;
-            }
-            if (finalUrl !== 'about:blank' && !finalUrl.includes('formSubmitForward')) {
-              console.log(`[Documentatie] Onverwachte URL na ${Math.round((Date.now() - pollStart) / 1000)}s: ${finalUrl.substring(0, 100)}`);
-              break;
-            }
-            await new Promise(r => setTimeout(r, 2000));
-          }
+        console.log(`[Documentatie] Form: ${formInfo.method} ${formInfo.action}`);
+        console.log(`[Documentatie] Form data keys: ${Object.keys(formInfo.data).join(', ')}`);
 
-          console.log(`[Documentatie] Finale popup URL: ${finalUrl.substring(0, 120)}`);
+        // Stap B: Submit form via directe HTTP request (max 300s timeout)
+        try {
+          console.log('[Documentatie] Directe HTTP POST naar form action...');
+          const postStart = Date.now();
+          const response = await context.request.post(formInfo.action, {
+            form: formInfo.data,
+            timeout: 300000,
+            maxRedirects: 10
+          });
+          const elapsed = Math.round((Date.now() - postStart) / 1000);
+          const status = response.status();
+          const ct = response.headers()['content-type'] || '';
+          const body = await response.body();
+          const finalUrl = response.url();
+          console.log(`[Documentatie] HTTP response na ${elapsed}s: status=${status}, type=${ct}, size=${body.length}, url=${finalUrl.substring(0, 100)}`);
 
-          // Haal PDF op: methode 1 — context.request.get (directe HTTP request, deelt sessie cookies)
-          if (finalUrl.includes('synthesePE')) {
-            try {
-              console.log('[Documentatie] PDF ophalen via context.request.get...');
-              const apiResp = await context.request.get(finalUrl);
-              const status = apiResp.status();
-              const ct = apiResp.headers()['content-type'] || '';
-              const body = await apiResp.body();
-              console.log(`[Documentatie] API response: status=${status}, type=${ct}, size=${body.length}`);
-              if (body.length > 500) {
-                pdfBuffer = body;
+          if (ct.includes('pdf') && body.length > 500) {
+            // Direct PDF ontvangen (HTTP redirects gevolgd)
+            pdfBuffer = body;
+            console.log(`[Documentatie] PDF direct ontvangen: ${pdfBuffer.length} bytes`);
+          } else if (body.length > 100) {
+            // Mogelijk formSubmitForward HTML met redirect URL
+            const html = body.toString('utf-8');
+            // Zoek redirect URL in meta refresh of JavaScript
+            const metaMatch = html.match(/content=["']\d+;\s*url=["']?([^"'\s>]+)/i);
+            const jsMatch = html.match(/(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)/i);
+            const redirectUrl = metaMatch?.[1] || jsMatch?.[1];
+
+            if (redirectUrl) {
+              const fullRedirectUrl = redirectUrl.startsWith('http')
+                ? redirectUrl
+                : new URL(redirectUrl, formInfo.action).href;
+              console.log(`[Documentatie] Redirect URL gevonden: ${fullRedirectUrl.substring(0, 120)}`);
+
+              // Fetch de redirect URL (synthesePE.do)
+              const pdfResp = await context.request.get(fullRedirectUrl, { timeout: 120000 });
+              const pdfCt = pdfResp.headers()['content-type'] || '';
+              const pdfBody = await pdfResp.body();
+              console.log(`[Documentatie] Redirect response: type=${pdfCt}, size=${pdfBody.length}`);
+
+              if (pdfBody.length > 500) {
+                pdfBuffer = pdfBody;
+                console.log(`[Documentatie] PDF via redirect: ${pdfBuffer.length} bytes`);
               }
-            } catch (e) {
-              console.log(`[Documentatie] context.request.get fout: ${e.message.substring(0, 100)}`);
+            } else {
+              console.log(`[Documentatie] Geen redirect URL in response HTML (eerste 300 chars): ${html.substring(0, 300)}`);
             }
           }
+        } catch (e) {
+          console.log(`[Documentatie] HTTP request fout: ${e.message.substring(0, 150)}`);
+        }
 
-          // Methode 2 — reload de popup pagina
-          if (!pdfBuffer && finalUrl.includes('synthesePE')) {
-            try {
-              console.log('[Documentatie] Fallback: reload popup...');
-              const resp = await pdfPage.reload({ waitUntil: 'load', timeout: 30000 });
-              if (resp) {
-                const ct = resp.headers()['content-type'] || '';
-                console.log(`[Documentatie] Reload: type=${ct}, status=${resp.status()}`);
-                if (ct.includes('pdf')) {
-                  pdfBuffer = await resp.body();
-                  console.log(`[Documentatie] PDF via reload: ${pdfBuffer.length} bytes`);
-                }
-              }
-            } catch (e) {
-              console.log(`[Documentatie] Reload fout: ${e.message.substring(0, 80)}`);
-            }
+        // Sluit eventuele popup die alsnog opende
+        for (const p of context.pages()) {
+          if (p !== docPage && (p.url().includes('formSubmitForward') || p.url().includes('synthesePE'))) {
+            await p.close().catch(() => {});
           }
-
-          await pdfPage.close().catch(() => {});
         }
 
         if (!pdfBuffer) {
