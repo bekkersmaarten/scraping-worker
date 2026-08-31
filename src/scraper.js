@@ -1047,20 +1047,22 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
         const pdfPage = await newPagePromise;
 
         if (pdfPage) {
-          // Wacht tot pagina initieel geladen is
-          await pdfPage.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
-          console.log(`[Documentatie] PDF pagina URL: ${pdfPage.url().substring(0, 100)}`);
+          console.log(`[Documentatie] Nieuwe pagina initial URL: ${pdfPage.url()}`);
 
-          // formSubmitForward redirect naar synthesePE.do — wacht tot URL verandert
-          if (pdfPage.url().includes('formSubmitForward')) {
-            console.log('[Documentatie] Nog op formSubmitForward, wachten op redirect naar synthesePE...');
-            try {
-              await pdfPage.waitForURL(url => !url.toString().includes('formSubmitForward'), { timeout: 60000 });
-              console.log(`[Documentatie] URL na redirect: ${pdfPage.url().substring(0, 100)}`);
-              await pdfPage.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
-            } catch (e) {
-              console.log(`[Documentatie] Redirect timeout: ${e.message.substring(0, 80)}`);
-            }
+          // De pagina gaat: about:blank → formSubmitForward.do → synthesePE.do (PDF)
+          // Wacht tot we voorbij about:blank EN formSubmitForward zijn (= synthesePE of andere finale URL)
+          try {
+            await pdfPage.waitForURL(
+              url => {
+                const href = url.href || url.toString();
+                return href !== 'about:blank' && !href.includes('formSubmitForward');
+              },
+              { timeout: 90000 }
+            );
+            console.log(`[Documentatie] Finale URL bereikt: ${pdfPage.url().substring(0, 100)}`);
+            await pdfPage.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
+          } catch (e) {
+            console.log(`[Documentatie] URL timeout na 90s. Huidige URL: ${pdfPage.url().substring(0, 100)}`);
           }
 
           // Geef response handler even tijd om PDF body te capturen
@@ -1068,10 +1070,10 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
             await pdfPage.waitForTimeout(3000);
           }
 
-          // Fallback 1: reload als URL synthesePE is maar body niet gevangen
-          if (!pdfBuffer && pdfPage.url().includes('synthesePE')) {
+          // Fallback 1: reload als we op de PDF URL zitten maar body niet gevangen
+          if (!pdfBuffer && pdfPage.url() !== 'about:blank') {
             try {
-              console.log('[Documentatie] Geen PDF via response, probeer reload...');
+              console.log(`[Documentatie] Geen PDF via response handler, probeer reload van ${pdfPage.url().substring(0, 80)}...`);
               const resp = await pdfPage.reload({ waitUntil: 'load', timeout: 30000 });
               if (resp) {
                 const ct = resp.headers()['content-type'] || '';
@@ -1083,23 +1085,6 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
               }
             } catch (e) {
               console.log(`[Documentatie] Reload mislukt: ${e.message.substring(0, 80)}`);
-            }
-          }
-
-          // Fallback 2: navigeer opnieuw naar de PDF URL
-          if (!pdfBuffer && (pdfPage.url().includes('synthesePE') || pdfPage.url().includes('.pdf'))) {
-            try {
-              console.log('[Documentatie] Laatste poging: navigeer opnieuw naar PDF URL...');
-              const resp = await pdfPage.goto(pdfPage.url(), { waitUntil: 'load', timeout: 30000 });
-              if (resp) {
-                const ct = resp.headers()['content-type'] || '';
-                if (ct.includes('pdf')) {
-                  pdfBuffer = await resp.body();
-                  console.log(`[Documentatie] PDF via goto: ${pdfBuffer.length} bytes`);
-                }
-              }
-            } catch (e) {
-              console.log(`[Documentatie] Goto mislukt: ${e.message.substring(0, 80)}`);
             }
           }
 
