@@ -8,32 +8,39 @@ app.use(express.json());
 const PORT = process.env.PORT || 3001;
 
 // =========================================
-// QUEUE: max 3 scrapes tegelijk (parallel browsers)
+// QUEUE: max 1 scrape tegelijk
+// Chromium is te zwaar om meerdere browsers tegelijk te draaien
 // =========================================
-const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT || '1');
 const queue = [];
-let activeJobs = 0;
+let isProcessing = false;
 
 function enqueue(job) {
   return new Promise((resolve, reject) => {
     queue.push({ job, resolve, reject });
-    console.log(`[Queue] Job toegevoegd, ${queue.length} in wachtrij, ${activeJobs}/${MAX_CONCURRENT} actief`);
+    console.log(`[Queue] Job toegevoegd, ${queue.length} in wachtrij`);
     processQueue();
   });
 }
 
 async function processQueue() {
-  while (activeJobs < MAX_CONCURRENT && queue.length > 0) {
-    const { job, resolve, reject } = queue.shift();
-    activeJobs++;
-    console.log(`[Queue] Start job, nog ${queue.length} in wachtrij, ${activeJobs}/${MAX_CONCURRENT} actief`);
+  if (isProcessing || queue.length === 0) return;
 
-    // Voer job uit zonder te blokkeren — zodat de while-loop meteen de volgende kan starten
-    job().then(resolve).catch(reject).finally(() => {
-      activeJobs--;
-      console.log(`[Queue] Job klaar, ${queue.length} in wachtrij, ${activeJobs}/${MAX_CONCURRENT} actief`);
+  isProcessing = true;
+  const { job, resolve, reject } = queue.shift();
+  console.log(`[Queue] Start job, nog ${queue.length} in wachtrij`);
+
+  try {
+    const result = await job();
+    resolve(result);
+  } catch (error) {
+    reject(error);
+  } finally {
+    isProcessing = false;
+    // Verwerk volgende job
+    if (queue.length > 0) {
+      console.log(`[Queue] Volgende job starten...`);
       processQueue();
-    });
+    }
   }
 }
 
@@ -43,8 +50,7 @@ app.get('/health', (req, res) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     queue_length: queue.length,
-    active_jobs: activeJobs,
-    max_concurrent: MAX_CONCURRENT
+    is_processing: isProcessing
   });
 });
 
@@ -268,5 +274,5 @@ app.listen(PORT, () => {
   console.log(`   POST /scrape             — Start een lookup (kenteken of VIN)`);
   console.log(`   POST /activate-warranty   — Activeer 2+6 garantie`);
   console.log(`   GET  /health             — Health check`);
-  console.log(`   Max ${MAX_CONCURRENT} gelijktijdige scrapes (queue-systeem)\n`);
+  console.log(`   Max 1 gelijktijdige scrape (queue-systeem)\n`);
 });
