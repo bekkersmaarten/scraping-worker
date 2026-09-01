@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3001;
 // =========================================
 // QUEUE: max 3 scrapes tegelijk (parallel browsers)
 // =========================================
-const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT || '3');
+const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT || '2');
 const queue = [];
 let activeJobs = 0;
 
