@@ -259,12 +259,13 @@ async function searchAndExtractVehicle(page, kenteken) {
   ]);
 
   console.log(`[Vehicle] Na submit URL: ${page.url()}`);
+  console.log(`[Vehicle] Frames: ${page.frames().map(f => f.url()).join(', ')}`);
   await page.waitForTimeout(5000);
 
   // Extract vehicle data — 4 attempts
   let vehicleData = null;
   for (let attempt = 1; attempt <= 4; attempt++) {
-    console.log(`[Vehicle] Poging ${attempt}/4 om voertuigdata te extraheren...`);
+    console.log(`[Vehicle] Poging ${attempt}/4 om voertuigdata te extraheren (zoek: "${cleanKenteken}")...`);
     vehicleData = await extractVehicleData(page, cleanKenteken);
     if (vehicleData) break;
 
@@ -302,7 +303,9 @@ async function extractVehicleData(page, kenteken) {
 
         // Check of dit frame de voertuigdata bevat
         if (!bodyText.includes('Kenteken') && !bodyText.includes('VIN')) return null;
-        if (!bodyText.includes(searchKenteken)) return null;
+        // Normaliseer: verwijder streepjes/spaties voor vergelijking (JSN-02-D → JSN02D)
+        const normalizedBody = bodyText.replace(/[-\s]/g, '');
+        if (!normalizedBody.includes(searchKenteken)) return null;
 
         // === METHODE 1: Zoek de hoofdtabel (class="data large center") ===
         const allThs = Array.from(document.querySelectorAll('th'));
