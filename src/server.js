@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const { scrapeServicebox, scrapeQuotelink, activateWarranty } = require('./scraper');
+const { scrapeServicebox, scrapeQuotelink, activateWarranty, scrapeFrequencyOnly } = require('./scraper');
 
 const app = express();
 app.use(express.json());
@@ -79,7 +79,7 @@ app.get('/health', (req, res) => {
  * }
  */
 app.post('/scrape', async (req, res) => {
-  const { lookup_id, kenteken, vin, km_stand, callback_url, callback_secret } = req.body;
+  const { lookup_id, kenteken, vin, km_stand, callback_url, callback_secret, only_frequency } = req.body;
 
   if (!lookup_id || (!kenteken && !vin)) {
     return res.status(400).json({ error: 'lookup_id en kenteken of vin zijn verplicht' });
@@ -87,10 +87,12 @@ app.post('/scrape', async (req, res) => {
 
   const searchType = kenteken ? 'kenteken' : 'vin';
   const searchValue = kenteken || vin;
+  const mode = only_frequency ? 'FREQUENCY_ONLY' : 'FULL';
 
   console.log(`\n========================================`);
   console.log(`[Server] Nieuwe scrape request ontvangen`);
   console.log(`[Server] Lookup ID: ${lookup_id}`);
+  console.log(`[Server] Mode: ${mode}`);
   console.log(`[Server] Type: ${searchType.toUpperCase()}`);
   console.log(`[Server] ${searchType}: ${searchValue}`);
   console.log(`[Server] KM-stand: ${km_stand || 'n.v.t.'}`);
@@ -98,11 +100,14 @@ app.post('/scrape', async (req, res) => {
   console.log(`========================================\n`);
 
   // Stuur meteen 200 terug — scraping wordt in de queue gezet
-  res.json({ status: 'accepted', lookup_id, type: searchType, queue_position: queue.length });
+  res.json({ status: 'accepted', lookup_id, type: searchType, mode, queue_position: queue.length });
 
   // Voeg toe aan queue (max 1 browser tegelijk)
   try {
     const result = await enqueue(async () => {
+      if (only_frequency && kenteken) {
+        return await scrapeFrequencyOnly(kenteken);
+      }
       return kenteken
         ? await scrapeServicebox(kenteken, km_stand)
         : await scrapeQuotelink(vin, km_stand);

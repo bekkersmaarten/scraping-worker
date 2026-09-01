@@ -2927,4 +2927,71 @@ async function activateWarranty(vin, kmStand, customerEmail) {
   }
 }
 
-module.exports = { scrapeServicebox, scrapeQuotelink, activateWarranty };
+/**
+ * Alleen service-frequentie ophalen via Documentatie PDF.
+ * Snelle modus voor bulk lookups: login → kenteken zoeken → Documentatie PDF → km/maanden.
+ * Skipt: recalls, Menu Pricing, ESA, interval extractie.
+ */
+async function scrapeFrequencyOnly(kenteken) {
+  const headless = process.env.HEADLESS !== 'false';
+  const slowMo = parseInt(process.env.SLOW_MO || '0');
+
+  console.log(`[FrequencyOnly] Start frequentie-only scrape voor kenteken: ${kenteken}`);
+  console.log(`[FrequencyOnly] Headless: ${headless}, SlowMo: ${slowMo}`);
+
+  const browser = await chromium.launch({ headless, slowMo });
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    httpCredentials: {
+      username: USERNAME,
+      password: PASSWORD
+    }
+  });
+
+  const page = await context.newPage();
+
+  try {
+    // STAP 1: Login
+    await login(page);
+
+    // STAP 2: Zoek voertuig (nodig om VIN te krijgen + DOCUMENTATIE tab beschikbaar te maken)
+    const vehicleData = await searchAndExtractVehicle(page, kenteken);
+    const vin = vehicleData?.vin || null;
+
+    if (!vin) {
+      console.log('[FrequencyOnly] Geen VIN gevonden, kan Documentatie niet openen');
+      return {
+        service_frequency: null,
+        service_frequency_km: null,
+        service_frequency_months: null,
+        service_frequency_source: null,
+        vin: null,
+        error: 'Geen VIN gevonden voor dit kenteken'
+      };
+    }
+
+    console.log(`[FrequencyOnly] VIN gevonden: ${vin}, start Documentatie extractie...`);
+
+    // STAP 3: Alleen Documentatie PDF extractie
+    const freq = await extractFrequencyFromDocumentation(page, context, vin);
+
+    console.log(`[FrequencyOnly] Resultaat: ${freq ? `${freq.km} km / ${freq.months} maanden` : 'geen frequentie gevonden'}`);
+
+    return {
+      service_frequency: freq,
+      service_frequency_km: freq?.km || null,
+      service_frequency_months: freq?.months || null,
+      service_frequency_source: freq?.source || null,
+      vin
+    };
+
+  } catch (error) {
+    console.error('[FrequencyOnly] Error:', error.message);
+    throw new Error(sanitizeErrorMessage(error.message));
+  } finally {
+    await browser.close();
+  }
+}
+
+module.exports = { scrapeServicebox, scrapeQuotelink, activateWarranty, scrapeFrequencyOnly };
