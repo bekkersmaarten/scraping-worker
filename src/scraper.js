@@ -980,147 +980,83 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
       console.log('[Documentatie] Tab "Overzicht onderhoud" niet gevonden');
     }
 
-    // ── STAP 5: Dropdown Normaal + Zoeken → PDF ──
+    // ── STAP 5: Extract dropdown values → construct synthesePE URL → GET PDF ──
+    // De dropdown option values zijn precies de condutil parameters voor synthesePE.do.
+    // Dus we hoeven geen form te POSTen — we bouwen de URL rechtstreeks.
     for (const frame of docPage.frames()) {
       try {
         // Zoek dropdown met "Normaal" optie
         const selects = await frame.$$('select');
+        let condutil = null;
+        let condutilsevere = null;
+
         for (const select of selects) {
           const options = await select.evaluate(el =>
             Array.from(el.options).map(o => ({ value: o.value, text: o.textContent?.trim() }))
           );
-          const normaalOpt = options.find(o => /normaa?l/i.test(o.text));
-          if (normaalOpt) {
-            console.log(`[Documentatie] Dropdown Normaal: "${normaalOpt.text}" (${normaalOpt.value})`);
-            await select.selectOption(normaalOpt.value);
-            await frame.waitForTimeout(500);
-            break;
-          }
-        }
+          console.log(`[Documentatie] Dropdown opties: ${JSON.stringify(options)}`);
 
-        // Zoek Zoeken knop — specifiek #btnRechercher (niet de verborgen top-bar "Rechercher")
-        const searchBtn = await frame.$('input#btnRechercher, input[value="Zoeken"][type="button"]');
-        if (!searchBtn) continue;
-
-        const btnInfo = await searchBtn.evaluate(el => `${el.tagName} type=${el.type} value="${el.value}" id="${el.id}"`);
-        console.log(`[Documentatie] Zoeken knop: ${btnInfo}`);
-
-        // ── PDF ophalen via directe HTTP request (geen browser popup) ──
-        // De browser popup duurt 150-240s op Railway. In plaats daarvan:
-        // 1. Extract form action + data uit de pagina
-        // 2. POST via context.request (deelt cookies met browser)
-        // 3. Volg redirect van formSubmitForward → synthesePE.do
-        let pdfBuffer = null;
-
-        // Stap A: Extract form info
-        const formInfo = await frame.evaluate(() => {
-          const btn = document.getElementById('btnRechercher');
-          const form = btn ? btn.closest('form') : null;
-          if (!form) return null;
-          const data = {};
-          const inputs = form.querySelectorAll('input, select, textarea');
-          for (const inp of inputs) {
-            if (inp.name) {
-              if (inp.type === 'checkbox' || inp.type === 'radio') {
-                if (inp.checked) data[inp.name] = inp.value || 'on';
-              } else if (inp.type !== 'image' && inp.type !== 'button') {
-                data[inp.name] = inp.value || '';
-              }
+          for (const opt of options) {
+            if (/normaa?l/i.test(opt.text) && opt.value) {
+              condutil = opt.value;
+              console.log(`[Documentatie] condutil (Normaal): ${condutil}`);
+            }
+            if (/zwa[ar]|sévère|severe/i.test(opt.text) && opt.value) {
+              condutilsevere = opt.value;
+              console.log(`[Documentatie] condutilsevere (Zwaar): ${condutilsevere}`);
             }
           }
-          return {
-            action: form.action || form.getAttribute('action'),
-            method: (form.method || 'POST').toUpperCase(),
-            data
-          };
-        });
+          if (condutil) break;
+        }
 
-        if (!formInfo) {
-          console.log('[Documentatie] Kon form data niet extraheren');
+        if (!condutil) {
+          console.log('[Documentatie] Geen condutil waarde gevonden in dropdown');
           continue;
         }
 
-        console.log(`[Documentatie] Form: ${formInfo.method} ${formInfo.action}`);
-        console.log(`[Documentatie] Form data keys: ${Object.keys(formInfo.data).join(', ')}`);
+        // Bouw synthesePE URL
+        const baseUrl = 'https://servicebox.mpsa.com/docapvpr/synthesePE.do';
+        const params = new URLSearchParams();
+        params.set('condutil', condutil);
+        if (condutilsevere) params.set('condutilsevere', condutilsevere);
+        const syntheseUrl = `${baseUrl}?${params.toString()}`;
+        console.log(`[Documentatie] Directe synthesePE URL: ${syntheseUrl}`);
 
-        // Stap B: Submit form via directe HTTP request (max 300s timeout)
+        // GET de PDF
+        let pdfBuffer = null;
         try {
-          console.log('[Documentatie] Directe HTTP POST naar form action...');
-          const postStart = Date.now();
-          const response = await context.request.post(formInfo.action, {
-            form: formInfo.data,
-            timeout: 300000,
-            maxRedirects: 10
-          });
-          const elapsed = Math.round((Date.now() - postStart) / 1000);
-          const status = response.status();
-          const ct = response.headers()['content-type'] || '';
-          const body = await response.body();
-          const finalUrl = response.url();
-          console.log(`[Documentatie] HTTP response na ${elapsed}s: status=${status}, type=${ct}, size=${body.length}, url=${finalUrl.substring(0, 100)}`);
+          const resp = await context.request.get(syntheseUrl, { timeout: 60000 });
+          const ct = resp.headers()['content-type'] || '';
+          const body = await resp.body();
+          const status = resp.status();
+          console.log(`[Documentatie] synthesePE response: status=${status}, type=${ct}, size=${body.length}`);
 
           if (ct.includes('pdf') && body.length > 500) {
-            // Direct PDF ontvangen (HTTP redirects gevolgd)
             pdfBuffer = body;
-            console.log(`[Documentatie] PDF direct ontvangen: ${pdfBuffer.length} bytes`);
-          } else if (body.length > 100) {
-            // HTML response — zoek naar synthesePE URL of andere redirect
-            const html = body.toString('utf-8');
+            console.log(`[Documentatie] PDF ontvangen: ${pdfBuffer.length} bytes`);
+          } else {
+            // Log wat we wel kregen
+            const preview = body.toString('utf-8').substring(0, 500);
+            console.log(`[Documentatie] Geen PDF, response preview: ${preview}`);
 
-            // Zoek synthesePE URL in de HTML (direct link, form action, JS, etc.)
-            const syntheseMatch = html.match(/(?:href|action|src|url|location)[=:]\s*["']?([^"'\s>]*synthesePE[^"'\s>]*)/i);
-            // Zoek formSubmitForward URL
-            const fsfMatch = html.match(/(?:href|action|src|url|location)[=:]\s*["']?([^"'\s>]*formSubmitForward[^"'\s>]*)/i);
-            // Zoek standaard redirect (meta refresh, JS location)
-            const metaMatch = html.match(/content=["']\d+;\s*url=["']?([^"'\s>]+)/i);
-            const jsMatch = html.match(/(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)/i);
-
-            // Prioriteit: synthesePE > formSubmitForward > meta/JS redirect
-            const targetUrl = syntheseMatch?.[1] || fsfMatch?.[1] || metaMatch?.[1] || jsMatch?.[1];
-
-            console.log(`[Documentatie] HTML response. synthesePE match: ${syntheseMatch?.[1]?.substring(0, 80) || 'nee'}, fsf match: ${fsfMatch?.[1]?.substring(0, 80) || 'nee'}`);
-
-            // Volg redirect chain tot we een PDF hebben (max 5 hops)
-            let currentUrl = targetUrl;
-            for (let hop = 0; hop < 5 && currentUrl && !pdfBuffer; hop++) {
-              const fullUrl = currentUrl.startsWith('http')
-                ? currentUrl
-                : new URL(currentUrl, formInfo.action).href;
-              console.log(`[Documentatie] Hop ${hop + 1}: GET ${fullUrl.substring(0, 120)}`);
-
-              const hopResp = await context.request.get(fullUrl, { timeout: 120000 });
-              const hopCt = hopResp.headers()['content-type'] || '';
-              const hopBody = await hopResp.body();
-              const hopUrl = hopResp.url();
-              console.log(`[Documentatie] Hop ${hop + 1} response: type=${hopCt}, size=${hopBody.length}, url=${hopUrl.substring(0, 100)}`);
-
-              if (hopCt.includes('pdf') && hopBody.length > 500) {
-                pdfBuffer = hopBody;
-                console.log(`[Documentatie] PDF gevonden na ${hop + 1} hops: ${pdfBuffer.length} bytes`);
-                break;
-              }
-
-              // Zoek volgende redirect in deze HTML
-              if (hopCt.includes('html') && hopBody.length > 100) {
-                const hopHtml = hopBody.toString('utf-8');
-                const nextSynthese = hopHtml.match(/(?:href|action|src|url|location)[=:]\s*["']?([^"'\s>]*synthesePE[^"'\s>]*)/i);
-                const nextFsf = hopHtml.match(/(?:href|action|src|url|location)[=:]\s*["']?([^"'\s>]*formSubmitForward[^"'\s>]*)/i);
-                const nextMeta = hopHtml.match(/content=["']\d+;\s*url=["']?([^"'\s>]+)/i);
-                const nextJs = hopHtml.match(/(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)/i);
-                currentUrl = nextSynthese?.[1] || nextFsf?.[1] || nextMeta?.[1] || nextJs?.[1] || null;
-                if (!currentUrl) {
-                  console.log(`[Documentatie] Geen verdere redirect in hop ${hop + 1} HTML (eerste 500): ${hopHtml.substring(0, 500)}`);
-                }
-              } else {
-                currentUrl = null;
+            // Fallback: probeer ook zonder condutilsevere
+            if (condutilsevere) {
+              const fallbackUrl = `${baseUrl}?condutil=${encodeURIComponent(condutil)}`;
+              console.log(`[Documentatie] Fallback URL (alleen condutil): ${fallbackUrl}`);
+              const resp2 = await context.request.get(fallbackUrl, { timeout: 60000 });
+              const ct2 = resp2.headers()['content-type'] || '';
+              const body2 = await resp2.body();
+              console.log(`[Documentatie] Fallback response: type=${ct2}, size=${body2.length}`);
+              if (ct2.includes('pdf') && body2.length > 500) {
+                pdfBuffer = body2;
               }
             }
           }
         } catch (e) {
-          console.log(`[Documentatie] HTTP request fout: ${e.message.substring(0, 150)}`);
+          console.log(`[Documentatie] HTTP GET fout: ${e.message.substring(0, 150)}`);
         }
 
-        // Sluit eventuele popup die alsnog opende
+        // Sluit eventuele popups
         for (const p of context.pages()) {
           if (p !== docPage && (p.url().includes('formSubmitForward') || p.url().includes('synthesePE'))) {
             await p.close().catch(() => {});
