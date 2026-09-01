@@ -1064,31 +1064,56 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
             pdfBuffer = body;
             console.log(`[Documentatie] PDF direct ontvangen: ${pdfBuffer.length} bytes`);
           } else if (body.length > 100) {
-            // Mogelijk formSubmitForward HTML met redirect URL
+            // HTML response — zoek naar synthesePE URL of andere redirect
             const html = body.toString('utf-8');
-            // Zoek redirect URL in meta refresh of JavaScript
+
+            // Zoek synthesePE URL in de HTML (direct link, form action, JS, etc.)
+            const syntheseMatch = html.match(/(?:href|action|src|url|location)[=:]\s*["']?([^"'\s>]*synthesePE[^"'\s>]*)/i);
+            // Zoek formSubmitForward URL
+            const fsfMatch = html.match(/(?:href|action|src|url|location)[=:]\s*["']?([^"'\s>]*formSubmitForward[^"'\s>]*)/i);
+            // Zoek standaard redirect (meta refresh, JS location)
             const metaMatch = html.match(/content=["']\d+;\s*url=["']?([^"'\s>]+)/i);
             const jsMatch = html.match(/(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)/i);
-            const redirectUrl = metaMatch?.[1] || jsMatch?.[1];
 
-            if (redirectUrl) {
-              const fullRedirectUrl = redirectUrl.startsWith('http')
-                ? redirectUrl
-                : new URL(redirectUrl, formInfo.action).href;
-              console.log(`[Documentatie] Redirect URL gevonden: ${fullRedirectUrl.substring(0, 120)}`);
+            // Prioriteit: synthesePE > formSubmitForward > meta/JS redirect
+            const targetUrl = syntheseMatch?.[1] || fsfMatch?.[1] || metaMatch?.[1] || jsMatch?.[1];
 
-              // Fetch de redirect URL (synthesePE.do)
-              const pdfResp = await context.request.get(fullRedirectUrl, { timeout: 120000 });
-              const pdfCt = pdfResp.headers()['content-type'] || '';
-              const pdfBody = await pdfResp.body();
-              console.log(`[Documentatie] Redirect response: type=${pdfCt}, size=${pdfBody.length}`);
+            console.log(`[Documentatie] HTML response. synthesePE match: ${syntheseMatch?.[1]?.substring(0, 80) || 'nee'}, fsf match: ${fsfMatch?.[1]?.substring(0, 80) || 'nee'}`);
 
-              if (pdfBody.length > 500) {
-                pdfBuffer = pdfBody;
-                console.log(`[Documentatie] PDF via redirect: ${pdfBuffer.length} bytes`);
+            // Volg redirect chain tot we een PDF hebben (max 5 hops)
+            let currentUrl = targetUrl;
+            for (let hop = 0; hop < 5 && currentUrl && !pdfBuffer; hop++) {
+              const fullUrl = currentUrl.startsWith('http')
+                ? currentUrl
+                : new URL(currentUrl, formInfo.action).href;
+              console.log(`[Documentatie] Hop ${hop + 1}: GET ${fullUrl.substring(0, 120)}`);
+
+              const hopResp = await context.request.get(fullUrl, { timeout: 120000 });
+              const hopCt = hopResp.headers()['content-type'] || '';
+              const hopBody = await hopResp.body();
+              const hopUrl = hopResp.url();
+              console.log(`[Documentatie] Hop ${hop + 1} response: type=${hopCt}, size=${hopBody.length}, url=${hopUrl.substring(0, 100)}`);
+
+              if (hopCt.includes('pdf') && hopBody.length > 500) {
+                pdfBuffer = hopBody;
+                console.log(`[Documentatie] PDF gevonden na ${hop + 1} hops: ${pdfBuffer.length} bytes`);
+                break;
               }
-            } else {
-              console.log(`[Documentatie] Geen redirect URL in response HTML (eerste 300 chars): ${html.substring(0, 300)}`);
+
+              // Zoek volgende redirect in deze HTML
+              if (hopCt.includes('html') && hopBody.length > 100) {
+                const hopHtml = hopBody.toString('utf-8');
+                const nextSynthese = hopHtml.match(/(?:href|action|src|url|location)[=:]\s*["']?([^"'\s>]*synthesePE[^"'\s>]*)/i);
+                const nextFsf = hopHtml.match(/(?:href|action|src|url|location)[=:]\s*["']?([^"'\s>]*formSubmitForward[^"'\s>]*)/i);
+                const nextMeta = hopHtml.match(/content=["']\d+;\s*url=["']?([^"'\s>]+)/i);
+                const nextJs = hopHtml.match(/(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)/i);
+                currentUrl = nextSynthese?.[1] || nextFsf?.[1] || nextMeta?.[1] || nextJs?.[1] || null;
+                if (!currentUrl) {
+                  console.log(`[Documentatie] Geen verdere redirect in hop ${hop + 1} HTML (eerste 500): ${hopHtml.substring(0, 500)}`);
+                }
+              } else {
+                currentUrl = null;
+              }
             }
           }
         } catch (e) {
