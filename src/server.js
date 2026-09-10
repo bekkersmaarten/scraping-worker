@@ -55,6 +55,32 @@ app.get('/health', (req, res) => {
 });
 
 /**
+ * GET /debug-frequency?kenteken=5SPR48
+ *
+ * Synchronous endpoint for debugging frequency extraction.
+ * Returns the result + debug_log directly (no callback).
+ */
+app.get('/debug-frequency', async (req, res) => {
+  const kenteken = req.query.kenteken;
+  if (!kenteken) {
+    return res.status(400).json({ error: 'kenteken query parameter is verplicht' });
+  }
+
+  console.log(`[Debug] Start debug-frequency voor kenteken: ${kenteken}`);
+
+  try {
+    const result = await enqueue(async () => {
+      return await scrapeFrequencyOnly(kenteken);
+    });
+    console.log(`[Debug] Resultaat: ${JSON.stringify(result).substring(0, 500)}`);
+    res.json(result);
+  } catch (error) {
+    console.error(`[Debug] Error: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * POST /scrape
  *
  * Wordt aangeroepen door de Supabase Edge Function (start-lookup).

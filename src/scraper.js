@@ -825,8 +825,9 @@ async function extractMaintenance(page, context, kmStand, vin) {
  * @param {string} vin - Chassisnummer
  * @returns {Object|null} { km, months, condition, source, raw } of null
  */
-async function extractFrequencyFromDocumentation(page, context, vin) {
-  console.log('[Documentatie] Start frequentie-extractie via Onderhoudsschema PDF...');
+async function extractFrequencyFromDocumentation(page, context, vin, debugLog = null) {
+  const dbg = (msg) => { console.log(msg); if (debugLog) debugLog.push(msg); };
+  dbg('[Documentatie] Start frequentie-extractie via Onderhoudsschema PDF...');
 
   try {
     // Gebruik de hoofdpagina — documentatie opent in een frame, niet een apart venster
@@ -838,7 +839,7 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
       try {
         const docTab = await frame.$('a:has-text("DOCUMENTATIE"), a:has-text("Documentatie")');
         if (docTab) {
-          console.log('[Documentatie] DOCUMENTATIE tab gevonden, hover...');
+          dbg('[Documentatie] DOCUMENTATIE tab gevonden, hover...');
           await docTab.hover();
           await frame.waitForTimeout(1500);
 
@@ -846,7 +847,7 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
           for (const f2 of docPage.frames()) {
             const techDoc = await f2.$('a:has-text("Technische documentatie")');
             if (techDoc) {
-              console.log('[Documentatie] Technische documentatie gevonden, klikken...');
+              dbg('[Documentatie] Technische documentatie gevonden, klikken...');
               await techDoc.click();
               techDocClicked = true;
               break;
@@ -858,13 +859,22 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
     }
 
     if (!techDocClicked) {
-      console.log('[Documentatie] Kon Technische documentatie niet bereiken');
+      dbg('[Documentatie] Kon Technische documentatie niet bereiken');
+      // Log alle menu-items voor debug
+      for (const frame of docPage.frames()) {
+        try {
+          const menuItems = await frame.evaluate(() =>
+            Array.from(document.querySelectorAll('a')).map(el => el.textContent?.trim()).filter(t => t && t.length > 2).slice(0, 30)
+          );
+          if (menuItems.length > 0) dbg(`[Documentatie] Menu-items in frame: ${menuItems.join(', ')}`);
+        } catch (e) { continue; }
+      }
       return null;
     }
 
     await docPage.waitForTimeout(3000);
     await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-    console.log('[Documentatie] Technische documentatie geladen');
+    dbg('[Documentatie] Technische documentatie geladen');
 
     // ── STAP 2: VIN invoeren en OK klikken ──
     // Het VIN veld is input#short-vin (type="search") en de OK knop is input[type="image"][name="VIN_OK_BUTTON"]
@@ -877,23 +887,23 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
           await vinInput.click();
           await vinInput.fill('');
           await vinInput.fill(vin);
-          console.log(`[Documentatie] VIN ingevuld in short-vin: ${vin}`);
+          dbg(`[Documentatie] VIN ingevuld in short-vin: ${vin}`);
 
           // OK knop is input[type="image"] met name="VIN_OK_BUTTON"
           const okBtn = await frame.$('input[name="VIN_OK_BUTTON"], input[type="image"]');
           if (okBtn) {
-            console.log('[Documentatie] VIN_OK_BUTTON gevonden, klikken...');
+            dbg('[Documentatie] VIN_OK_BUTTON gevonden, klikken...');
             await okBtn.click();
             vinEntered = true;
           } else {
             // Fallback: Enter toets
-            console.log('[Documentatie] Geen image button, probeer Enter...');
+            dbg('[Documentatie] Geen image button, probeer Enter...');
             await vinInput.press('Enter');
             vinEntered = true;
           }
 
           if (vinEntered) {
-            console.log('[Documentatie] VIN verstuurd, wachten op laden...');
+            dbg('[Documentatie] VIN verstuurd, wachten op laden...');
             await docPage.waitForTimeout(5000);
             await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
           }
@@ -903,7 +913,7 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
     }
 
     if (!vinEntered) {
-      console.log('[Documentatie] VIN veld niet gevonden');
+      dbg('[Documentatie] VIN veld niet gevonden');
       return null;
     }
 
@@ -914,10 +924,10 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
         const schemaLink = await frame.$('a:has-text("Onderhoudsschema")');
         if (schemaLink) {
           const linkText = await schemaLink.evaluate(el => el.textContent?.trim()?.substring(0, 50));
-          console.log(`[Documentatie] Onderhoudsschema's link gevonden: "${linkText}"`);
+          dbg(`[Documentatie] Onderhoudsschema's link gevonden: "${linkText}"`);
           await schemaLink.click();
           schemaClicked = true;
-          console.log('[Documentatie] Onderhoudsschema\'s geklikt, wachten...');
+          dbg('[Documentatie] Onderhoudsschema\'s geklikt, wachten...');
           await docPage.waitForTimeout(5000);
           await docPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
           break;
@@ -926,14 +936,14 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
     }
 
     if (!schemaClicked) {
-      console.log('[Documentatie] Onderhoudsschema\'s link niet gevonden');
+      dbg('[Documentatie] Onderhoudsschema\'s link niet gevonden');
       // Log beschikbare links
       for (const frame of docPage.frames()) {
         try {
           const links = await frame.evaluate(() =>
             Array.from(document.querySelectorAll('a')).map(el => el.textContent?.trim()).filter(t => t && t.length > 2).slice(0, 20)
           );
-          if (links.length > 0) console.log(`[Documentatie] Beschikbare links: ${links.join(', ')}`);
+          if (links.length > 0) dbg(`[Documentatie] Beschikbare links: ${links.join(', ')}`);
         } catch (e) { continue; }
       }
       return null;
@@ -946,7 +956,7 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
         // De tab kan elk element-type zijn (a, td, div, span, etc.)
         const overzichtTab = await frame.$('a:has-text("Overzicht onderhoud"), td:has-text("Overzicht onderhoud"), div:has-text("Overzicht onderhoud"), span:has-text("Overzicht onderhoud"), *:has-text("Overzicht onderhoud")');
         if (overzichtTab) {
-          console.log('[Documentatie] Tab "Overzicht onderhoud" gevonden, klikken...');
+          dbg('[Documentatie] Tab "Overzicht onderhoud" gevonden, klikken...');
           await overzichtTab.click();
           overzichtClicked = true;
           await docPage.waitForTimeout(3000);
@@ -970,7 +980,7 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
             return false;
           });
           if (clicked) {
-            console.log('[Documentatie] Tab "Overzicht onderhoud" geklikt via JS');
+            dbg('[Documentatie] Tab "Overzicht onderhoud" geklikt via JS');
             overzichtClicked = true;
             await docPage.waitForTimeout(3000);
             await docPage.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
@@ -980,7 +990,7 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
       }
     }
     if (!overzichtClicked) {
-      console.log('[Documentatie] Tab "Overzicht onderhoud" niet gevonden');
+      dbg('[Documentatie] Tab "Overzicht onderhoud" niet gevonden');
     }
 
     // ── STAP 5: Extract dropdown values → construct synthesePE URL → GET PDF ──
@@ -997,23 +1007,23 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
           const options = await select.evaluate(el =>
             Array.from(el.options).map(o => ({ value: o.value, text: o.textContent?.trim() }))
           );
-          console.log(`[Documentatie] Dropdown opties: ${JSON.stringify(options)}`);
+          dbg(`[Documentatie] Dropdown opties: ${JSON.stringify(options)}`);
 
           for (const opt of options) {
             if (/normaa?l/i.test(opt.text) && opt.value) {
               condutil = opt.value;
-              console.log(`[Documentatie] condutil (Normaal): ${condutil}`);
+              dbg(`[Documentatie] condutil (Normaal): ${condutil}`);
             }
             if (/zwa[ar]|sévère|severe/i.test(opt.text) && opt.value) {
               condutilsevere = opt.value;
-              console.log(`[Documentatie] condutilsevere (Zwaar): ${condutilsevere}`);
+              dbg(`[Documentatie] condutilsevere (Zwaar): ${condutilsevere}`);
             }
           }
           if (condutil) break;
         }
 
         if (!condutil) {
-          console.log('[Documentatie] Geen condutil waarde gevonden in dropdown');
+          dbg('[Documentatie] Geen condutil waarde gevonden in dropdown');
           continue;
         }
 
@@ -1023,7 +1033,7 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
         params.set('condutil', condutil);
         if (condutilsevere) params.set('condutilsevere', condutilsevere);
         const syntheseUrl = `${baseUrl}?${params.toString()}`;
-        console.log(`[Documentatie] Directe synthesePE URL: ${syntheseUrl}`);
+        dbg(`[Documentatie] Directe synthesePE URL: ${syntheseUrl}`);
 
         // GET de PDF
         let pdfBuffer = null;
@@ -1032,31 +1042,31 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
           const ct = resp.headers()['content-type'] || '';
           const body = await resp.body();
           const status = resp.status();
-          console.log(`[Documentatie] synthesePE response: status=${status}, type=${ct}, size=${body.length}`);
+          dbg(`[Documentatie] synthesePE response: status=${status}, type=${ct}, size=${body.length}`);
 
           if (ct.includes('pdf') && body.length > 500) {
             pdfBuffer = body;
-            console.log(`[Documentatie] PDF ontvangen: ${pdfBuffer.length} bytes`);
+            dbg(`[Documentatie] PDF ontvangen: ${pdfBuffer.length} bytes`);
           } else {
             // Log wat we wel kregen
             const preview = body.toString('utf-8').substring(0, 500);
-            console.log(`[Documentatie] Geen PDF, response preview: ${preview}`);
+            dbg(`[Documentatie] Geen PDF, response preview: ${preview}`);
 
             // Fallback: probeer ook zonder condutilsevere
             if (condutilsevere) {
               const fallbackUrl = `${baseUrl}?condutil=${encodeURIComponent(condutil)}`;
-              console.log(`[Documentatie] Fallback URL (alleen condutil): ${fallbackUrl}`);
+              dbg(`[Documentatie] Fallback URL (alleen condutil): ${fallbackUrl}`);
               const resp2 = await context.request.get(fallbackUrl, { timeout: 60000 });
               const ct2 = resp2.headers()['content-type'] || '';
               const body2 = await resp2.body();
-              console.log(`[Documentatie] Fallback response: type=${ct2}, size=${body2.length}`);
+              dbg(`[Documentatie] Fallback response: type=${ct2}, size=${body2.length}`);
               if (ct2.includes('pdf') && body2.length > 500) {
                 pdfBuffer = body2;
               }
             }
           }
         } catch (e) {
-          console.log(`[Documentatie] HTTP GET fout: ${e.message.substring(0, 150)}`);
+          dbg(`[Documentatie] HTTP GET fout: ${e.message.substring(0, 150)}`);
         }
 
         // Sluit eventuele popups
@@ -1067,31 +1077,31 @@ async function extractFrequencyFromDocumentation(page, context, vin) {
         }
 
         if (!pdfBuffer) {
-          console.log('[Documentatie] Geen PDF ontvangen');
+          dbg('[Documentatie] Geen PDF ontvangen');
           return null;
         }
 
         // Parse PDF
         try {
           const pdfData = await pdfParse(pdfBuffer);
-          console.log(`[Documentatie] PDF geparsed: ${pdfData.numpages} pagina's, ${pdfData.text.length} chars`);
-          console.log(`[Documentatie] PDF tekst (eerste 500): ${pdfData.text.substring(0, 500)}`);
+          dbg(`[Documentatie] PDF geparsed: ${pdfData.numpages} pagina's, ${pdfData.text.length} chars`);
+          dbg(`[Documentatie] PDF tekst (eerste 500): ${pdfData.text.substring(0, 500)}`);
           return parsePdfText(pdfData.text);
         } catch (parseErr) {
-          console.log(`[Documentatie] PDF parse fout: ${parseErr.message.substring(0, 100)}`);
+          dbg(`[Documentatie] PDF parse fout: ${parseErr.message.substring(0, 100)}`);
           return null;
         }
       } catch (e) {
-        console.log(`[Documentatie] Frame error: ${e.message.substring(0, 100)}`);
+        dbg(`[Documentatie] Frame error: ${e.message.substring(0, 100)}`);
         continue;
       }
     }
 
-    console.log('[Documentatie] Kon geen PDF genereren');
+    dbg('[Documentatie] Kon geen PDF genereren');
     return null;
 
   } catch (error) {
-    console.log(`[Documentatie] Error: ${error.message.substring(0, 150)}`);
+    dbg(`[Documentatie] Error: ${error.message.substring(0, 150)}`);
     return null;
   }
 }
@@ -2935,6 +2945,7 @@ async function activateWarranty(vin, kmStand, customerEmail) {
 async function scrapeFrequencyOnly(kenteken) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '0');
+  const debugLog = [];
 
   console.log(`[FrequencyOnly] Start frequentie-only scrape voor kenteken: ${kenteken}`);
   console.log(`[FrequencyOnly] Headless: ${headless}, SlowMo: ${slowMo}`);
@@ -2967,14 +2978,15 @@ async function scrapeFrequencyOnly(kenteken) {
         service_frequency_months: null,
         service_frequency_source: null,
         vin: null,
-        error: 'Geen VIN gevonden voor dit kenteken'
+        error: 'Geen VIN gevonden voor dit kenteken',
+        debug_log: debugLog
       };
     }
 
     console.log(`[FrequencyOnly] VIN gevonden: ${vin}, start Documentatie extractie...`);
 
-    // STAP 3: Alleen Documentatie PDF extractie
-    const freq = await extractFrequencyFromDocumentation(page, context, vin);
+    // STAP 3: Alleen Documentatie PDF extractie — pass debugLog for diagnostics
+    const freq = await extractFrequencyFromDocumentation(page, context, vin, debugLog);
 
     console.log(`[FrequencyOnly] Resultaat: ${freq ? `${freq.km} km / ${freq.months} maanden` : 'geen frequentie gevonden'}`);
 
@@ -2983,7 +2995,8 @@ async function scrapeFrequencyOnly(kenteken) {
       service_frequency_km: freq?.km || null,
       service_frequency_months: freq?.months || null,
       service_frequency_source: freq?.source || null,
-      vin
+      vin,
+      debug_log: debugLog
     };
 
   } catch (error) {
