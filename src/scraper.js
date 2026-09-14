@@ -3139,292 +3139,224 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       await formPage.waitForTimeout(500);
     }
 
-    // STAP 9: Klik "Indienen" — zoek op formPage eerst, dan warrantyPage
-    console.log('[Warranty] Klikken op Indienen...');
-    let submitBtn = await formPage.$('button:has-text("Indienen"), input[value*="Indienen"], button:has-text("Submit"), input[type="submit"]');
-    if (!submitBtn && formPage !== warrantyPage) {
-      submitBtn = await warrantyPage.$('button:has-text("Indienen"), input[value*="Indienen"], button:has-text("Submit"), input[type="submit"]');
-    }
-    if (!submitBtn) {
-      // Fallback: zoek elke button met "indienen" in de tekst (case insensitive)
-      submitBtn = await formPage.$('button');
-      const allBtns = await formPage.$$('button');
-      for (const btn of allBtns) {
-        const txt = await btn.evaluate(el => el.textContent?.trim()?.toLowerCase());
-        if (txt && (txt.includes('indienen') || txt.includes('submit') || txt.includes('bevestig'))) {
-          submitBtn = btn;
-          console.log(`[Warranty] Submit knop gevonden via fallback: "${txt}"`);
+    // ══════════════════════════════════════════════════════════════
+    // STAP 9: Submit met retry (CEM backend kan timeout geven)
+    // ══════════════════════════════════════════════════════════════
+    const MAX_SUBMIT_ATTEMPTS = 3;
+    let submitResult = null;
+
+    for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {
+      console.log(`[Warranty] Submit poging ${attempt}/${MAX_SUBMIT_ATTEMPTS}...`);
+
+      // Zoek submit knop
+      let submitBtn = await formPage.$('button:has-text("Indienen"), input[value*="Indienen"], button:has-text("Submit"), input[type="submit"]');
+      if (!submitBtn && formPage !== warrantyPage) {
+        submitBtn = await warrantyPage.$('button:has-text("Indienen"), input[value*="Indienen"], button:has-text("Submit"), input[type="submit"]');
+      }
+      if (!submitBtn) {
+        const allBtns = await formPage.$$('button');
+        for (const btn of allBtns) {
+          const txt = await btn.evaluate(el => el.textContent?.trim()?.toLowerCase());
+          if (txt && (txt.includes('indienen') || txt.includes('submit') || txt.includes('bevestig'))) {
+            submitBtn = btn;
+            break;
+          }
+        }
+      }
+      if (!submitBtn) {
+        console.log('[Warranty] Indienen-knop niet gevonden');
+        submitResult = { status: 'error', message: 'Indienen-knop niet gevonden' };
+        break;
+      }
+
+      // Klik submit
+      await submitBtn.click();
+      console.log('[Warranty] Indienen geklikt, wachten op resultaat...');
+
+      // Wacht op response (snackbar/dialog of pagina-wijziging)
+      await warrantyPage.waitForTimeout(5000);
+
+      // Check voor overlay/dialog/snackbar
+      const overlayText = await warrantyPage.evaluate(() => {
+        const overlay = document.querySelector('.cdk-overlay-container');
+        return overlay?.textContent?.trim()?.substring(0, 300) || '';
+      }).catch(() => '');
+      console.log(`[Warranty] Overlay tekst na submit: "${overlayText}"`);
+
+      // ── CEM TIMEOUT: "CEM reageert niet" → klik OK en retry ──
+      if (/CEM reageert niet|CEM ne répond pas|CEM is not responding/i.test(overlayText)) {
+        console.log(`[Warranty] CEM backend timeout (poging ${attempt}) — klik OK en probeer opnieuw`);
+
+        // Klik de OK knop in de dialog
+        const okBtn = await warrantyPage.$('.cdk-overlay-container button, .cdk-overlay-container [role="button"]');
+        if (okBtn) {
+          await okBtn.click();
+          console.log('[Warranty] OK knop geklikt, dialog gesloten');
+        } else {
+          // Probeer via tekst
+          await warrantyPage.evaluate(() => {
+            const btns = document.querySelectorAll('.cdk-overlay-container button, .cdk-overlay-container a');
+            for (const b of btns) {
+              if (b.textContent?.trim() === 'OK') { b.click(); break; }
+            }
+          });
+        }
+        await warrantyPage.waitForTimeout(2000);
+
+        if (attempt < MAX_SUBMIT_ATTEMPTS) {
+          console.log(`[Warranty] Wacht 5s voor retry ${attempt + 1}...`);
+          await warrantyPage.waitForTimeout(5000);
+          continue; // Retry
+        } else {
+          submitResult = { status: 'error', message: 'CEM backend reageert niet na 3 pogingen' };
           break;
         }
       }
-    }
-    if (!submitBtn) {
-      await warrantyPage.screenshot({ path: `warranty-submit-debug-${Date.now()}.png` });
-      await browser.close();
-      return { status: 'error', vin, message: 'Indienen-knop niet gevonden', vehicle: vehicleData };
-    }
 
-    // Log URL vóór submit
-    const preSubmitUrl = await formPage.evaluate(() => window.location.href);
-    console.log(`[Warranty] URL vóór submit: ${preSubmitUrl}`);
+      // ── Wacht extra op networkidle ──
+      await warrantyPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+      await warrantyPage.waitForTimeout(2000);
 
-    // Bewaar VIN tekst op pagina vóór submit (om te detecteren of pagina reset naar nieuw formulier)
-    const preSubmitVinOnPage = await formPage.evaluate((targetVin) => {
-      return document.body?.innerText?.includes(targetVin) || false;
-    }, vin);
-    console.log(`[Warranty] VIN ${vin} op pagina vóór submit: ${preSubmitVinOnPage}`);
+      // Re-check overlay (kan alsnog verschijnen na networkidle)
+      const overlayText2 = await warrantyPage.evaluate(() => {
+        const overlay = document.querySelector('.cdk-overlay-container');
+        return overlay?.textContent?.trim()?.substring(0, 300) || '';
+      }).catch(() => '');
 
-    // Monitor netwerk response tijdens submit
-    let apiResponse = null;
-    const responsePromise = warrantyPage.waitForResponse(
-      resp => resp.url().includes('allucare') && (resp.request().method() === 'POST' || resp.request().method() === 'PUT'),
-      { timeout: 15000 }
-    ).then(resp => {
-      apiResponse = { status: resp.status(), url: resp.url(), method: resp.request().method() };
-      return resp.text().catch(() => '');
-    }).catch(e => {
-      console.log(`[Warranty] Geen API response gevangen: ${e.message}`);
-      return null;
-    });
-
-    await submitBtn.click();
-    console.log('[Warranty] Indienen geklikt, wachten op resultaat...');
-
-    // Wacht op API response OF timeout
-    const apiResponseText = await responsePromise;
-    if (apiResponse) {
-      console.log(`[Warranty] API Response: status=${apiResponse.status}, url=${apiResponse.url}, method=${apiResponse.method}`);
-      if (apiResponseText) {
-        console.log(`[Warranty] API Response body (eerste 500 chars): ${apiResponseText.substring(0, 500)}`);
+      if (/CEM reageert niet|CEM ne répond pas|CEM is not responding/i.test(overlayText2)) {
+        console.log(`[Warranty] CEM timeout na wachten (poging ${attempt})`);
+        const okBtn = await warrantyPage.$('.cdk-overlay-container button');
+        if (okBtn) await okBtn.click();
+        await warrantyPage.waitForTimeout(2000);
+        if (attempt < MAX_SUBMIT_ATTEMPTS) {
+          await warrantyPage.waitForTimeout(5000);
+          continue;
+        }
+        submitResult = { status: 'error', message: 'CEM backend reageert niet na 3 pogingen' };
+        break;
       }
-    }
 
-    // Wacht kort op UI update
-    await warrantyPage.waitForTimeout(2000);
+      // ── Check resultaat ──
+      const resultText = await warrantyPage.evaluate(() => document.body?.innerText || '');
+      console.log(`[Warranty] Resultaat (poging ${attempt}): ${resultText.substring(0, 500)}`);
 
-    // Check voor Angular Material snackbar/toast (verschijnt bij succes of fout)
-    const snackbarText = await warrantyPage.evaluate(() => {
-      const snackbar = document.querySelector('snack-bar-container, .mat-snack-bar-container, .mat-mdc-snack-bar-container, mat-snack-bar-container, simple-snack-bar, .cdk-overlay-container .mat-snack-bar-container');
-      if (snackbar) return snackbar.textContent?.trim();
-      // Check ook in overlay container
-      const overlay = document.querySelector('.cdk-overlay-container');
-      if (overlay && overlay.textContent?.trim()) return overlay.textContent.trim().substring(0, 200);
-      return null;
-    }).catch(() => null);
-    if (snackbarText) {
-      console.log(`[Warranty] Snackbar/overlay tekst: ${snackbarText}`);
-    }
+      // Contract-ID extraheren
+      let contractId = null;
+      const contractMatch = resultText.match(/contract aangemaakt met ID[:\s]*([A-Z0-9\-]+)/i)
+        || resultText.match(/contract[:\s]+ID[:\s]*([A-Z0-9\-]+)/i)
+        || resultText.match(/contract(?:\s+is)?\s+(?:aangemaakt|created)[^]*?(?:ID|nummer)[:\s]*([A-Z0-9\-]+)/i);
+      if (contractMatch) contractId = contractMatch[1];
 
-    // Wacht extra op networkidle
-    await warrantyPage.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-    await warrantyPage.waitForTimeout(1000);
-
-    // Check URL na submit
-    const postSubmitUrl = await formPage.evaluate(() => window.location.href);
-    console.log(`[Warranty] URL na submit: ${postSubmitUrl}`);
-
-    // Check resultaat pagina tekst
-    const resultText = await warrantyPage.evaluate(() => document.body?.innerText || '');
-    console.log(`[Warranty] Resultaat pagina (eerste 1000 chars): ${resultText.substring(0, 1000)}`);
-
-    // Check of VIN nog op pagina staat (als het formulier reset naar leeg, is VIN weg)
-    const postSubmitVinOnPage = resultText.includes(vin);
-    console.log(`[Warranty] VIN ${vin} op pagina na submit: ${postSubmitVinOnPage}`);
-
-    // Check submission history tabel
-    const historyInfo = await warrantyPage.evaluate(() => {
-      // Zoek de Indieningsgeschiedenis sectie
-      const tables = document.querySelectorAll('table, mat-table, .mat-table');
-      const history = [];
-      tables.forEach(t => {
-        history.push({
-          rows: t.querySelectorAll('tr, mat-row, .mat-row').length,
-          text: t.textContent?.trim()?.substring(0, 300)
-        });
-      });
-      // Zoek ook naar list items in geschiedenissectie
-      const histSection = Array.from(document.querySelectorAll('h2, h3, h4, .mat-h2, .mat-h3')).find(el =>
-        el.textContent?.toLowerCase().includes('geschiedenis') || el.textContent?.toLowerCase().includes('history')
-      );
-      const histSectionText = histSection ? histSection.parentElement?.textContent?.trim()?.substring(0, 500) : null;
-      return { tables: history, historySection: histSectionText };
-    }).catch(() => ({}));
-    console.log(`[Warranty] History info: ${JSON.stringify(historyInfo)}`);
-
-    // Check Angular form state na submit (ng-invalid = form reset en niet ingediend)
-    const postSubmitFormState = await formPage.evaluate(() => {
-      const form = document.querySelector('form');
-      if (!form) return { formPresent: false };
-      return {
-        formPresent: true,
-        formClasses: form.className?.substring(0, 100),
-        ngInvalid: form.classList.contains('ng-invalid'),
-        ngPristine: form.classList.contains('ng-pristine'),
-        ngDirty: form.classList.contains('ng-dirty'),
-        ngTouched: form.classList.contains('ng-touched'),
-        ngValid: form.classList.contains('ng-valid')
-      };
-    }).catch(() => ({}));
-    console.log(`[Warranty] Form state na submit: ${JSON.stringify(postSubmitFormState)}`);
-
-    // Contract-ID extraheren als beschikbaar
-    let contractId = null;
-    const contractMatch = resultText.match(/contract aangemaakt met ID[:\s]*([A-Z0-9\-]+)/i)
-      || resultText.match(/contract[:\s]+ID[:\s]*([A-Z0-9\-]+)/i)
-      || resultText.match(/contract(?:\s+is)?\s+(?:aangemaakt|created)[^]*?(?:ID|nummer)[:\s]*([A-Z0-9\-]+)/i);
-    if (contractMatch) {
-      contractId = contractMatch[1];
-      console.log(`[Warranty] Contract ID: ${contractId}`);
-    }
-
-    // ══════════════════════════════════════════════════════════════
-    // RESULTAAT DETECTIE (verbeterd)
-    // ══════════════════════════════════════════════════════════════
-
-    // 1. Succes via API response (HTTP 200/201 op POST)
-    if (apiResponse && (apiResponse.status === 200 || apiResponse.status === 201) && apiResponse.method === 'POST') {
-      // API call was succesvol — check of het echt een contract bevestiging is
-      const apiSuccess = apiResponseText && (
-        /contract/i.test(apiResponseText) ||
-        /success/i.test(apiResponseText) ||
-        /created/i.test(apiResponseText) ||
-        /aangemaakt/i.test(apiResponseText)
-      );
-      if (apiSuccess || !apiResponseText) {
-        console.log(`[Warranty] 2+6 activatie GELUKT via API response voor ${vin}`);
-        await browser.close();
-        return {
+      // Succes via pagina tekst
+      if (/contract aangemaakt met ID|contract has been created|contract is aangemaakt|succesvol geactiveerd|successfully activated/i.test(resultText)) {
+        console.log(`[Warranty] 2+6 activatie GELUKT voor ${vin}`);
+        submitResult = {
           status: 'activated',
-          vin,
           message: '2+6 garantie succesvol geactiveerd',
-          vehicle: vehicleData,
-          km_stand: kmStand,
           contract_id: contractId,
-          api_response: apiResponseText?.substring(0, 500),
           result_text: resultText.substring(0, 500)
         };
+        break;
       }
-    }
 
-    // 2. Succes via snackbar/toast bericht
-    if (snackbarText && (
-      /succes|gelukt|aangemaakt|created|contract|activat/i.test(snackbarText) &&
-      !/fout|error|mislukt|failed/i.test(snackbarText)
-    )) {
-      console.log(`[Warranty] 2+6 activatie GELUKT via snackbar voor ${vin}: "${snackbarText}"`);
-      await browser.close();
-      return {
-        status: 'activated',
-        vin,
-        message: '2+6 garantie succesvol geactiveerd',
-        vehicle: vehicleData,
-        km_stand: kmStand,
-        contract_id: contractId,
-        result_text: resultText.substring(0, 500)
-      };
-    }
+      // Succes via snackbar (bijv. toast met bevestiging)
+      if (overlayText && /succes|gelukt|aangemaakt|created|contract|activat/i.test(overlayText) && !/fout|error|mislukt|failed|reageert niet/i.test(overlayText)) {
+        console.log(`[Warranty] 2+6 activatie GELUKT via overlay voor ${vin}`);
+        submitResult = {
+          status: 'activated',
+          message: '2+6 garantie succesvol geactiveerd',
+          contract_id: contractId,
+          result_text: resultText.substring(0, 500)
+        };
+        break;
+      }
 
-    // 3. Succes via pagina tekst
-    if (/contract aangemaakt met ID|contract has been created|contract is aangemaakt|succesvol geactiveerd|successfully activated/i.test(resultText)) {
-      console.log(`[Warranty] 2+6 activatie GELUKT voor ${vin}`);
-      await browser.close();
-      return {
-        status: 'activated',
-        vin,
-        message: '2+6 garantie succesvol geactiveerd',
-        vehicle: vehicleData,
-        km_stand: kmStand,
-        contract_id: contractId,
-        result_text: resultText.substring(0, 500)
-      };
-    }
+      // Al eerder geactiveerd
+      if (/al geactiveerd|already activated|bestaat al|reeds ingediend|already submitted/i.test(resultText)) {
+        console.log(`[Warranty] Was al geactiveerd voor ${vin}`);
+        submitResult = {
+          status: 'already_activated',
+          message: 'Garantie was al geactiveerd',
+          contract_id: contractId,
+          result_text: resultText.substring(0, 500)
+        };
+        break;
+      }
 
-    // 4. Succes detectie: form reset naar pristine (= form werd ingediend en reset)
-    if (postSubmitFormState.ngPristine && postSubmitFormState.ngValid && !postSubmitVinOnPage) {
-      console.log(`[Warranty] 2+6 activatie WAARSCHIJNLIJK GELUKT (form reset + VIN weg) voor ${vin}`);
-      await browser.close();
-      return {
-        status: 'activated',
-        vin,
-        message: '2+6 garantie succesvol geactiveerd (form reset na submit)',
-        vehicle: vehicleData,
-        km_stand: kmStand,
-        contract_id: contractId,
-        result_text: resultText.substring(0, 500)
-      };
-    }
-
-    // 5. Al eerder geactiveerd
-    if (/al geactiveerd|already activated|bestaat al|reeds ingediend|already submitted/i.test(resultText)) {
-      console.log(`[Warranty] Was al geactiveerd voor ${vin}`);
-      await browser.close();
-      return {
-        status: 'already_activated',
-        vin,
-        message: 'Garantie was al geactiveerd',
-        vehicle: vehicleData,
-        contract_id: contractId,
-        result_text: resultText.substring(0, 500)
-      };
-    }
-
-    // 6. Echt fout: form nog steeds ng-invalid OF ng-dirty+touched (niet ingediend)
-    if (postSubmitFormState.ngInvalid) {
-      console.log(`[Warranty] Formulier niet ingediend — form is ng-invalid na submit`);
-      await warrantyPage.screenshot({ path: `warranty-form-stuck-${Date.now()}.png` });
-      await browser.close();
-      return {
-        status: 'error',
-        vin,
-        message: 'Formulier niet ingediend (verplicht veld niet gevuld)',
-        vehicle: vehicleData,
-        result_text: resultText.substring(0, 500)
-      };
-    }
-
-    // 7. Snackbar met foutmelding
-    if (snackbarText && /fout|error|mislukt|failed|ongeldig|invalid/i.test(snackbarText)) {
-      console.log(`[Warranty] Fout via snackbar: "${snackbarText}"`);
-      await browser.close();
-      return {
-        status: 'error',
-        vin,
-        message: `Formulier fout: ${snackbarText.substring(0, 100)}`,
-        vehicle: vehicleData,
-        result_text: resultText.substring(0, 500)
-      };
-    }
-
-    // 8. VIN nog steeds op pagina + form nog steeds ng-dirty = mogelijk niet ingediend
-    if (postSubmitVinOnPage && postSubmitFormState.ngDirty && postSubmitFormState.ngTouched) {
-      // Maar check eerst of er ook een history entry is (= was wel ingediend)
-      const hasHistory = historyInfo?.tables?.some(t => t.rows > 1) || false;
-      if (!hasHistory) {
-        console.log(`[Warranty] Formulier waarschijnlijk niet ingediend (VIN nog op pagina, form dirty+touched, geen history)`);
-        await warrantyPage.screenshot({ path: `warranty-form-stuck-${Date.now()}.png` });
-        await browser.close();
+      // Form state check
+      const formState = await formPage.evaluate(() => {
+        const form = document.querySelector('form');
+        if (!form) return {};
         return {
-          status: 'error',
-          vin,
-          message: 'Formulier niet ingediend (verplicht veld niet gevuld)',
-          vehicle: vehicleData,
+          ngPristine: form.classList.contains('ng-pristine'),
+          ngValid: form.classList.contains('ng-valid'),
+          ngInvalid: form.classList.contains('ng-invalid'),
+          ngDirty: form.classList.contains('ng-dirty')
+        };
+      }).catch(() => ({}));
+
+      // Form reset naar pristine + VIN weg = succesvol ingediend
+      const vinStillOnPage = resultText.includes(vin);
+      if (formState.ngPristine && formState.ngValid && !vinStillOnPage) {
+        console.log(`[Warranty] 2+6 activatie GELUKT (form reset) voor ${vin}`);
+        submitResult = {
+          status: 'activated',
+          message: '2+6 garantie succesvol geactiveerd (form reset na submit)',
+          contract_id: contractId,
           result_text: resultText.substring(0, 500)
         };
+        break;
       }
-      // Er IS history — mogelijk toch ingediend
-      console.log(`[Warranty] VIN nog op pagina maar er is submission history — mogelijk toch ingediend`);
+
+      // Form is ng-invalid = verplicht veld niet gevuld
+      if (formState.ngInvalid) {
+        console.log(`[Warranty] Formulier ng-invalid na submit`);
+        submitResult = {
+          status: 'error',
+          message: 'Formulier niet ingediend (verplicht veld niet gevuld)',
+          result_text: resultText.substring(0, 500)
+        };
+        break;
+      }
+
+      // Andere fout via overlay
+      if (overlayText && /fout|error|mislukt|failed|ongeldig|invalid/i.test(overlayText)) {
+        console.log(`[Warranty] Fout via overlay: "${overlayText}"`);
+        // Klik OK als er een knop is
+        const okBtn2 = await warrantyPage.$('.cdk-overlay-container button');
+        if (okBtn2) await okBtn2.click();
+        await warrantyPage.waitForTimeout(1000);
+        if (attempt < MAX_SUBMIT_ATTEMPTS) continue;
+        submitResult = {
+          status: 'error',
+          message: `Formulier fout: ${overlayText.substring(0, 100)}`,
+          result_text: resultText.substring(0, 500)
+        };
+        break;
+      }
+
+      // Geen duidelijk resultaat — als we nog retries hebben, probeer opnieuw
+      if (attempt < MAX_SUBMIT_ATTEMPTS) {
+        console.log(`[Warranty] Geen duidelijk resultaat, retry ${attempt + 1}...`);
+        await warrantyPage.waitForTimeout(3000);
+        continue;
+      }
+
+      // Laatste poging zonder resultaat
+      submitResult = {
+        status: 'error',
+        message: 'Geen bevestiging van contract aangemaakt gevonden',
+        result_text: resultText.substring(0, 500)
+      };
     }
 
-    // 9. Als niets duidelijk is: log alles en geef onbekend resultaat
-    console.log(`[Warranty] Onbekend resultaat — geen duidelijke succes of fout indicator`);
-    await warrantyPage.screenshot({ path: `warranty-result-debug-${Date.now()}.png` });
+    // Return het resultaat
     await browser.close();
     return {
-      status: 'error',
+      ...submitResult,
       vin,
-      message: 'Geen bevestiging van contract aangemaakt gevonden',
       vehicle: vehicleData,
-      result_text: resultText.substring(0, 500)
+      km_stand: kmStand
     };
 
   } catch (error) {
