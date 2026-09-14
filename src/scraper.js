@@ -2509,85 +2509,113 @@ async function activateWarranty(vin, kmStand, customerEmail) {
 
     // ══════════════════════════════════════════════════════════════
     // STAP 6: Gebruiksvoorwaarden mat-slide-toggle activeren (MOET EERST)
-    // De keuze Normaal/Verzwaard is een mat-slide-toggle naast <span class="mr-1">Normaal</span>.
-    // Structuur: <div class="in-column-value"><label>Gebruiksvoorwaarden</label>
-    //   <div class="d-flex"><span class="mr-1">Normaal</span><mat-slide-toggle ...></div></div>
-    // km/email velden zijn disabled totdat deze toggle geactiveerd is.
+    // Angular Material rendert de toggle async — poll tot hij verschijnt (max 15s).
+    // Na klik: verifieer dat hij checked is, anders opnieuw klikken.
     // ══════════════════════════════════════════════════════════════
     console.log('[Warranty] STAP 6: Gebruiksvoorwaarden toggle activeren...');
     let gebruiksToggled = false;
 
-    try {
-      // Zoek de mat-slide-toggle die bij "Gebruiksvoorwaarden" / "Normaal" hoort
-      const toggleResult = await formPage.evaluate(() => {
+    // Helper: zoek en klik de toggle in de pagina
+    const findAndClickToggle = async () => {
+      return await formPage.evaluate(() => {
         // Zoek de span met "Normaal" — de toggle zit als sibling in dezelfde d-flex container
         const spans = Array.from(document.querySelectorAll('span'));
         for (const span of spans) {
           if (span.textContent?.trim() === 'Normaal' || span.textContent?.trim() === 'Normal') {
-            // De mat-slide-toggle is een sibling van deze span in de d-flex parent
             const parent = span.parentElement;
             if (!parent) continue;
-            const toggle = parent.querySelector('mat-slide-toggle, .mat-slide-toggle');
+            const toggle = parent.querySelector('mat-slide-toggle, .mat-slide-toggle, .mat-mdc-slide-toggle');
             if (toggle) {
-              const isChecked = toggle.classList.contains('mat-checked');
-              // Klik de toggle-label om te activeren (= "Normaal" kiezen)
-              const label = toggle.querySelector('.mat-slide-toggle-label, label');
-              if (label) { label.click(); } else { toggle.click(); }
+              const isChecked = toggle.classList.contains('mat-checked') || toggle.classList.contains('mat-mdc-slide-toggle-checked');
+              if (!isChecked) {
+                const label = toggle.querySelector('.mat-slide-toggle-label, .mdc-switch, label');
+                if (label) { label.click(); } else { toggle.click(); }
+              }
               return { found: true, clicked: 'sibling-toggle', wasChecked: isChecked };
             }
           }
         }
 
-        // Fallback: zoek de toggle in de "in-column-value" div die ook "Gebruiksvoorwaarden" bevat
+        // Fallback: zoek toggle in "in-column-value" div met "Gebruiksvoorwaarden"
         const valueDivs = document.querySelectorAll('.in-column-value, [class*="column-value"]');
         for (const div of valueDivs) {
           if (div.textContent?.includes('Gebruiksvoorwaarden')) {
-            const toggle = div.querySelector('mat-slide-toggle, .mat-slide-toggle');
+            const toggle = div.querySelector('mat-slide-toggle, .mat-slide-toggle, .mat-mdc-slide-toggle');
             if (toggle) {
-              const isChecked = toggle.classList.contains('mat-checked');
-              const label = toggle.querySelector('.mat-slide-toggle-label, label');
-              if (label) { label.click(); } else { toggle.click(); }
+              const isChecked = toggle.classList.contains('mat-checked') || toggle.classList.contains('mat-mdc-slide-toggle-checked');
+              if (!isChecked) {
+                const label = toggle.querySelector('.mat-slide-toggle-label, .mdc-switch, label');
+                if (label) { label.click(); } else { toggle.click(); }
+              }
               return { found: true, clicked: 'value-div-toggle', wasChecked: isChecked };
             }
           }
         }
 
-        // Laatste fallback: zoek alle mat-slide-toggles en neem de eerste die niet gecheckt is
-        const allToggles = document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle');
+        // Laatste fallback: alle mat-slide-toggles
+        const allToggles = document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle, .mat-mdc-slide-toggle');
         const toggleInfo = Array.from(allToggles).map((t, i) => ({
           index: i,
           id: t.id,
-          checked: t.classList.contains('mat-checked'),
+          checked: t.classList.contains('mat-checked') || t.classList.contains('mat-mdc-slide-toggle-checked'),
           text: t.closest('div')?.textContent?.trim()?.substring(0, 80) || ''
         }));
 
         return { found: false, allToggles: toggleInfo };
       });
+    };
 
-      if (toggleResult.found) {
-        gebruiksToggled = true;
-        console.log(`[Warranty] Gebruiksvoorwaarden toggle geklikt (${toggleResult.clicked}, was checked: ${toggleResult.wasChecked})`);
-      } else {
-        console.log(`[Warranty] Geen Gebruiksvoorwaarden toggle gevonden. Alle toggles: ${JSON.stringify(toggleResult.allToggles)}`);
+    // Poll tot de toggle verschijnt (max 15 seconden, elke 2s)
+    const maxToggleAttempts = 8;
+    for (let attempt = 1; attempt <= maxToggleAttempts; attempt++) {
+      try {
+        const toggleResult = await findAndClickToggle();
+
+        if (toggleResult.found) {
+          gebruiksToggled = true;
+          console.log(`[Warranty] Gebruiksvoorwaarden toggle geklikt (${toggleResult.clicked}, was checked: ${toggleResult.wasChecked}, poging ${attempt})`);
+          break;
+        } else {
+          console.log(`[Warranty] Poging ${attempt}/${maxToggleAttempts}: toggle niet gevonden. Alle toggles: ${JSON.stringify(toggleResult.allToggles)}`);
+          if (attempt < maxToggleAttempts) {
+            await formPage.waitForTimeout(2000);
+          }
+        }
+      } catch (e) {
+        console.log(`[Warranty] Toggle poging ${attempt} fout: ${e.message.substring(0, 150)}`);
+        if (attempt < maxToggleAttempts) {
+          await formPage.waitForTimeout(2000);
+        }
       }
-    } catch (e) {
-      console.log(`[Warranty] Gebruiksvoorwaarden toggle fout: ${e.message.substring(0, 200)}`);
     }
 
     // Wacht tot velden enabled worden na toggle
     if (gebruiksToggled) {
       await formPage.waitForTimeout(2000);
 
-      // Verifieer toggle status
-      const toggleVerify = await formPage.evaluate(() => {
-        const toggles = document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle');
-        return Array.from(toggles).map(t => ({
-          id: t.id,
-          checked: t.classList.contains('mat-checked'),
-          text: t.textContent?.trim()?.substring(0, 50)
-        }));
-      });
-      console.log(`[Warranty] Toggle verificatie na wacht: ${JSON.stringify(toggleVerify)}`);
+      // Verifieer toggle status — als niet checked, probeer opnieuw te klikken
+      for (let verifyAttempt = 1; verifyAttempt <= 3; verifyAttempt++) {
+        const toggleVerify = await formPage.evaluate(() => {
+          const toggles = document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle, .mat-mdc-slide-toggle');
+          return Array.from(toggles).map(t => ({
+            id: t.id,
+            checked: t.classList.contains('mat-checked') || t.classList.contains('mat-mdc-slide-toggle-checked'),
+            text: t.textContent?.trim()?.substring(0, 50)
+          }));
+        });
+        console.log(`[Warranty] Toggle verificatie (poging ${verifyAttempt}): ${JSON.stringify(toggleVerify)}`);
+
+        const anyChecked = toggleVerify.some(t => t.checked);
+        if (anyChecked) {
+          console.log('[Warranty] Toggle is checked — doorgaan');
+          break;
+        }
+
+        // Niet checked → opnieuw klikken
+        console.log('[Warranty] Toggle NIET checked na klik, opnieuw proberen...');
+        await findAndClickToggle();
+        await formPage.waitForTimeout(2000);
+      }
 
       // Check of er nu enabled input velden zijn
       const enabledInputs = await formPage.evaluate(() => {
@@ -2597,6 +2625,8 @@ async function activateWarranty(vin, kmStand, customerEmail) {
         }));
       });
       console.log(`[Warranty] Input velden na toggle: ${JSON.stringify(enabledInputs)}`);
+    } else {
+      console.log('[Warranty] WAARSCHUWING: Gebruiksvoorwaarden toggle niet gevonden na alle pogingen');
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -2746,12 +2776,12 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     console.log(`[Warranty] Alle toggle/checkbox elementen op formPage: ${JSON.stringify(allToggleElements)}`);
 
     // 8a: Unchecked mat-slide-toggles aanzetten (behalve Gebruiksvoorwaarden die al aan staat)
-    const uncheckedSlideToggles = await formPage.$$('mat-slide-toggle:not(.mat-checked), .mat-slide-toggle:not(.mat-checked)');
+    const uncheckedSlideToggles = await formPage.$$('mat-slide-toggle:not(.mat-checked):not(.mat-mdc-slide-toggle-checked), .mat-slide-toggle:not(.mat-checked), .mat-mdc-slide-toggle:not(.mat-mdc-slide-toggle-checked)');
     console.log(`[Warranty] ${uncheckedSlideToggles.length} unchecked slide toggles`);
     for (const toggle of uncheckedSlideToggles) {
       const text = await toggle.evaluate(el => el.textContent?.trim()?.substring(0, 80));
       await toggle.evaluate(el => {
-        const label = el.querySelector('.mat-slide-toggle-label, label');
+        const label = el.querySelector('.mat-slide-toggle-label, .mdc-switch, label');
         if (label) { label.click(); } else { el.click(); }
       });
       await formPage.waitForTimeout(500);
@@ -2789,7 +2819,7 @@ async function activateWarranty(vin, kmStand, customerEmail) {
 
     // Als formPage !== warrantyPage, doe hetzelfde op warrantyPage
     if (formPage !== warrantyPage) {
-      const wpToggles = await warrantyPage.$$('mat-slide-toggle:not(.mat-checked), .mat-slide-toggle:not(.mat-checked)');
+      const wpToggles = await warrantyPage.$$('mat-slide-toggle:not(.mat-checked):not(.mat-mdc-slide-toggle-checked), .mat-slide-toggle:not(.mat-checked), .mat-mdc-slide-toggle:not(.mat-mdc-slide-toggle-checked)');
       const wpMatCbs = await warrantyPage.$$('mat-checkbox:not(.mat-checkbox-checked), .mat-checkbox:not(.mat-checkbox-checked)');
       const wpCbs = await warrantyPage.$$('input[type="checkbox"]:not(:checked)');
       console.log(`[Warranty] warrantyPage extra: ${wpToggles.length} toggles, ${wpMatCbs.length} mat-cb, ${wpCbs.length} cb`);
