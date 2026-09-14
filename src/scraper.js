@@ -2537,11 +2537,23 @@ async function activateWarranty(vin, kmStand, customerEmail) {
 
     // ══════════════════════════════════════════════════════════════
     // STAP 6: Gebruiksvoorwaarden mat-slide-toggle activeren (MOET EERST)
-    // Angular Material rendert de toggle async — poll tot hij verschijnt (max 15s).
-    // Na klik: verifieer dat hij checked is, anders opnieuw klikken.
+    // Sommige formulieren gebruiken mat-slide-toggle, andere gewone checkboxes.
+    // Check eerst of er toggles zijn — zo niet, skip naar STAP 7.
     // ══════════════════════════════════════════════════════════════
-    console.log('[Warranty] STAP 6: Gebruiksvoorwaarden toggle activeren...');
+    const hasAnyToggleElements = await formPage.evaluate(() => {
+      return document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle, .mat-mdc-slide-toggle').length > 0;
+    });
+    const hasRegularCheckboxes = await formPage.evaluate(() => {
+      return document.querySelectorAll('input[type="checkbox"]').length > 0;
+    });
+    console.log(`[Warranty] STAP 6: toggles=${hasAnyToggleElements}, checkboxes=${hasRegularCheckboxes}`);
+
     let gebruiksToggled = false;
+
+    // Als er geen toggles maar wél checkboxes zijn, skip STAP 6 (checkboxes worden in STAP 8 afgehandeld)
+    if (!hasAnyToggleElements && hasRegularCheckboxes) {
+      console.log('[Warranty] Geen mat-slide-toggle op formulier, checkboxes worden in STAP 8 afgehandeld — skip toggle polling');
+    }
 
     // Helper: zoek en klik de toggle in de pagina
     const findAndClickToggle = async () => {
@@ -2593,68 +2605,71 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       });
     };
 
-    // Poll tot de toggle verschijnt (max 15 seconden, elke 2s)
-    const maxToggleAttempts = 8;
-    for (let attempt = 1; attempt <= maxToggleAttempts; attempt++) {
-      try {
-        const toggleResult = await findAndClickToggle();
+    // Alleen toggle-polling doen als er daadwerkelijk toggle-elementen zijn (of nog geen checkboxes)
+    if (hasAnyToggleElements || !hasRegularCheckboxes) {
+      // Poll tot de toggle verschijnt (max 15 seconden, elke 2s)
+      const maxToggleAttempts = 8;
+      for (let attempt = 1; attempt <= maxToggleAttempts; attempt++) {
+        try {
+          const toggleResult = await findAndClickToggle();
 
-        if (toggleResult.found) {
-          gebruiksToggled = true;
-          console.log(`[Warranty] Gebruiksvoorwaarden toggle geklikt (${toggleResult.clicked}, was checked: ${toggleResult.wasChecked}, poging ${attempt})`);
-          break;
-        } else {
-          console.log(`[Warranty] Poging ${attempt}/${maxToggleAttempts}: toggle niet gevonden. Alle toggles: ${JSON.stringify(toggleResult.allToggles)}`);
+          if (toggleResult.found) {
+            gebruiksToggled = true;
+            console.log(`[Warranty] Gebruiksvoorwaarden toggle geklikt (${toggleResult.clicked}, was checked: ${toggleResult.wasChecked}, poging ${attempt})`);
+            break;
+          } else {
+            console.log(`[Warranty] Poging ${attempt}/${maxToggleAttempts}: toggle niet gevonden. Alle toggles: ${JSON.stringify(toggleResult.allToggles)}`);
+            if (attempt < maxToggleAttempts) {
+              await formPage.waitForTimeout(2000);
+            }
+          }
+        } catch (e) {
+          console.log(`[Warranty] Toggle poging ${attempt} fout: ${e.message.substring(0, 150)}`);
           if (attempt < maxToggleAttempts) {
             await formPage.waitForTimeout(2000);
           }
         }
-      } catch (e) {
-        console.log(`[Warranty] Toggle poging ${attempt} fout: ${e.message.substring(0, 150)}`);
-        if (attempt < maxToggleAttempts) {
+      }
+
+      // Wacht tot velden enabled worden na toggle
+      if (gebruiksToggled) {
+        await formPage.waitForTimeout(2000);
+
+        // Verifieer toggle status — als niet checked, probeer opnieuw te klikken
+        for (let verifyAttempt = 1; verifyAttempt <= 3; verifyAttempt++) {
+          const toggleVerify = await formPage.evaluate(() => {
+            const toggles = document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle, .mat-mdc-slide-toggle');
+            return Array.from(toggles).map(t => ({
+              id: t.id,
+              checked: t.classList.contains('mat-checked') || t.classList.contains('mat-mdc-slide-toggle-checked'),
+              text: t.textContent?.trim()?.substring(0, 50)
+            }));
+          });
+          console.log(`[Warranty] Toggle verificatie (poging ${verifyAttempt}): ${JSON.stringify(toggleVerify)}`);
+
+          const anyChecked = toggleVerify.some(t => t.checked);
+          if (anyChecked) {
+            console.log('[Warranty] Toggle is checked — doorgaan');
+            break;
+          }
+
+          // Niet checked → opnieuw klikken
+          console.log('[Warranty] Toggle NIET checked na klik, opnieuw proberen...');
+          await findAndClickToggle();
           await formPage.waitForTimeout(2000);
         }
-      }
-    }
 
-    // Wacht tot velden enabled worden na toggle
-    if (gebruiksToggled) {
-      await formPage.waitForTimeout(2000);
-
-      // Verifieer toggle status — als niet checked, probeer opnieuw te klikken
-      for (let verifyAttempt = 1; verifyAttempt <= 3; verifyAttempt++) {
-        const toggleVerify = await formPage.evaluate(() => {
-          const toggles = document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle, .mat-mdc-slide-toggle');
-          return Array.from(toggles).map(t => ({
-            id: t.id,
-            checked: t.classList.contains('mat-checked') || t.classList.contains('mat-mdc-slide-toggle-checked'),
-            text: t.textContent?.trim()?.substring(0, 50)
+        // Check of er nu enabled input velden zijn
+        const enabledInputs = await formPage.evaluate(() => {
+          const inputs = document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"])');
+          return Array.from(inputs).map(i => ({
+            name: i.name, id: i.id, type: i.type, disabled: i.disabled, readOnly: i.readOnly, visible: i.offsetParent !== null
           }));
         });
-        console.log(`[Warranty] Toggle verificatie (poging ${verifyAttempt}): ${JSON.stringify(toggleVerify)}`);
-
-        const anyChecked = toggleVerify.some(t => t.checked);
-        if (anyChecked) {
-          console.log('[Warranty] Toggle is checked — doorgaan');
-          break;
-        }
-
-        // Niet checked → opnieuw klikken
-        console.log('[Warranty] Toggle NIET checked na klik, opnieuw proberen...');
-        await findAndClickToggle();
-        await formPage.waitForTimeout(2000);
+        console.log(`[Warranty] Input velden na toggle: ${JSON.stringify(enabledInputs)}`);
+      } else {
+        console.log('[Warranty] WAARSCHUWING: Gebruiksvoorwaarden toggle niet gevonden na alle pogingen');
       }
-
-      // Check of er nu enabled input velden zijn
-      const enabledInputs = await formPage.evaluate(() => {
-        const inputs = document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"])');
-        return Array.from(inputs).map(i => ({
-          name: i.name, id: i.id, type: i.type, disabled: i.disabled, readOnly: i.readOnly, visible: i.offsetParent !== null
-        }));
-      });
-      console.log(`[Warranty] Input velden na toggle: ${JSON.stringify(enabledInputs)}`);
-    } else {
-      console.log('[Warranty] WAARSCHUWING: Gebruiksvoorwaarden toggle niet gevonden na alle pogingen');
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -2816,13 +2831,13 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       console.log(`[Warranty] Slide toggle aangezet: "${text}"`);
     }
 
-    // 8b: Unchecked mat-checkboxes aanvinken
-    const uncheckedMatCbs = await formPage.$$('mat-checkbox:not(.mat-checkbox-checked), .mat-checkbox:not(.mat-checkbox-checked)');
+    // 8b: Unchecked mat-checkboxes aanvinken (inclusief MDC variant)
+    const uncheckedMatCbs = await formPage.$$('mat-checkbox:not(.mat-checkbox-checked):not(.mat-mdc-checkbox-checked), .mat-checkbox:not(.mat-checkbox-checked), .mat-mdc-checkbox:not(.mat-mdc-checkbox-checked)');
     console.log(`[Warranty] ${uncheckedMatCbs.length} unchecked mat-checkboxes`);
     for (const cb of uncheckedMatCbs) {
       const text = await cb.evaluate(el => el.textContent?.trim()?.substring(0, 80));
       await cb.evaluate(el => {
-        const label = el.querySelector('.mat-checkbox-label, label, .mat-checkbox-inner-container');
+        const label = el.querySelector('.mat-checkbox-label, label, .mat-checkbox-inner-container, .mdc-checkbox, .mat-mdc-checkbox-touch-target');
         if (label) { label.click(); } else { el.click(); }
       });
       await formPage.waitForTimeout(500);
@@ -2834,15 +2849,30 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     console.log(`[Warranty] ${uncheckedCbs.length} unchecked regular checkboxes`);
     for (const cb of uncheckedCbs) {
       const text = await cb.evaluate(el => {
-        const label = el.closest('label') || el.parentElement;
+        const label = el.closest('label') || el.closest('mat-checkbox') || el.parentElement;
         return label ? label.textContent?.trim()?.substring(0, 80) : '';
       });
+      // Klik het checkbox element DIRECT — niet de parent div
+      // (labels zonder for-attribuut togglen de checkbox niet bij click op parent)
+      try {
+        await cb.click({ force: true });
+      } catch (e) {
+        // Fallback: klik via DOM
+        await cb.evaluate(el => el.click());
+      }
+      await formPage.waitForTimeout(500);
+      // Dispatch change event voor Angular change detection
       await cb.evaluate(el => {
-        const label = el.closest('label') || el.parentElement;
-        if (label && label !== el) { label.click(); } else { el.click(); }
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
       });
-      await formPage.waitForTimeout(300);
-      console.log(`[Warranty] Checkbox aangevinkt: "${text}"`);
+      const isChecked = await cb.evaluate(el => el.checked);
+      console.log(`[Warranty] Checkbox aangevinkt: "${text}" (checked: ${isChecked})`);
+      if (!isChecked) {
+        console.log('[Warranty] WAARSCHUWING: Checkbox nog steeds niet checked na klik, probeer nogmaals...');
+        await cb.evaluate(el => { el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); });
+        await formPage.waitForTimeout(300);
+      }
     }
 
     // Als formPage !== warrantyPage, doe hetzelfde op warrantyPage
@@ -2860,8 +2890,9 @@ async function activateWarranty(vin, kmStand, customerEmail) {
         await warrantyPage.waitForTimeout(500);
       }
       for (const c of wpCbs) {
-        await c.evaluate(el => { const l = el.closest('label') || el.parentElement; if (l && l !== el) l.click(); else el.click(); });
-        await warrantyPage.waitForTimeout(300);
+        try { await c.click({ force: true }); } catch (e) { await c.evaluate(el => el.click()); }
+        await warrantyPage.waitForTimeout(500);
+        await c.evaluate(el => { el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('input', { bubbles: true })); });
       }
     }
 
@@ -2872,18 +2903,35 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     const verifyEmail = await formPage.locator('input[type="email"]:not([disabled])').first().inputValue().catch(() => '');
     console.log(`[Warranty] Pre-submit verificatie: km="${verifyKm}", email="${verifyEmail ? 'filled' : 'empty'}"`);
 
-    // Hercheck alle toggle-states na aanvinken
+    // Hercheck alle toggle/checkbox states na aanvinken
     const postToggleState = await formPage.evaluate(() => {
       const items = [];
-      document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle').forEach(el => {
-        items.push({ type: 'slide', checked: el.classList.contains('mat-checked'), text: el.textContent?.trim()?.substring(0, 60) });
+      document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle, .mat-mdc-slide-toggle').forEach(el => {
+        items.push({ type: 'slide', checked: el.classList.contains('mat-checked') || el.classList.contains('mat-mdc-slide-toggle-checked'), text: el.textContent?.trim()?.substring(0, 60) });
       });
-      document.querySelectorAll('mat-checkbox, .mat-checkbox').forEach(el => {
-        items.push({ type: 'matcb', checked: el.classList.contains('mat-checkbox-checked'), text: el.textContent?.trim()?.substring(0, 60) });
+      document.querySelectorAll('mat-checkbox, .mat-checkbox, .mat-mdc-checkbox').forEach(el => {
+        items.push({ type: 'matcb', checked: el.classList.contains('mat-checkbox-checked') || el.classList.contains('mat-mdc-checkbox-checked'), text: el.textContent?.trim()?.substring(0, 60) });
+      });
+      document.querySelectorAll('input[type="checkbox"]').forEach(el => {
+        items.push({ type: 'cb', checked: el.checked, text: (el.closest('label') || el.closest('mat-checkbox') || el.parentElement)?.textContent?.trim()?.substring(0, 60) || '' });
       });
       return items;
     });
     console.log(`[Warranty] Post-toggle state: ${JSON.stringify(postToggleState)}`);
+
+    // Als er nog unchecked checkboxes zijn, forceer ze
+    const stillUnchecked = postToggleState.filter(t => t.type === 'cb' && !t.checked);
+    if (stillUnchecked.length > 0) {
+      console.log(`[Warranty] WAARSCHUWING: ${stillUnchecked.length} checkbox(es) nog steeds unchecked, forceer...`);
+      await formPage.evaluate(() => {
+        document.querySelectorAll('input[type="checkbox"]:not(:checked)').forEach(el => {
+          el.checked = true;
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      });
+      await formPage.waitForTimeout(500);
+    }
 
     // STAP 9: Klik "Indienen" — zoek op formPage eerst, dan warrantyPage
     console.log('[Warranty] Klikken op Indienen...');
@@ -2958,15 +3006,23 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       };
     }
 
-    // 3. Formulier nog zichtbaar → niet ingediend (bijv. Gebruiksvoorwaarden niet gevuld)
+    // 3. Formulier nog zichtbaar → niet ingediend (bijv. verplicht veld niet gevuld)
     if (/Gebruiksvoorwaarden/i.test(resultText) || /Formulier indienen/i.test(resultText)) {
       console.log(`[Warranty] Formulier niet ingediend — verplicht veld niet gevuld`);
+      // Log welke checkboxes er zijn en hun status
+      const finalCbState = await warrantyPage.evaluate(() => {
+        return Array.from(document.querySelectorAll('input[type="checkbox"]')).map(el => ({
+          checked: el.checked,
+          text: (el.closest('label') || el.closest('mat-checkbox') || el.parentElement)?.textContent?.trim()?.substring(0, 80) || ''
+        }));
+      });
+      console.log(`[Warranty] Checkbox states bij fout: ${JSON.stringify(finalCbState)}`);
       await warrantyPage.screenshot({ path: `warranty-form-stuck-${Date.now()}.png` });
       await browser.close();
       return {
         status: 'error',
         vin,
-        message: 'Formulier niet ingediend (verplicht veld Gebruiksvoorwaarden niet gevuld)',
+        message: 'Formulier niet ingediend (verplicht veld niet gevuld)',
         vehicle: vehicleData,
         result_text: resultText.substring(0, 500)
       };
