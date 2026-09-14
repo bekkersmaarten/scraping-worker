@@ -2831,73 +2831,143 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       console.log(`[Warranty] Slide toggle aangezet: "${text}"`);
     }
 
-    // 8b: Unchecked mat-checkboxes aanvinken (inclusief MDC variant)
-    const uncheckedMatCbs = await formPage.$$('mat-checkbox:not(.mat-checkbox-checked):not(.mat-mdc-checkbox-checked), .mat-checkbox:not(.mat-checkbox-checked), .mat-mdc-checkbox:not(.mat-mdc-checkbox-checked)');
-    console.log(`[Warranty] ${uncheckedMatCbs.length} unchecked mat-checkboxes`);
-    for (const cb of uncheckedMatCbs) {
-      const text = await cb.evaluate(el => el.textContent?.trim()?.substring(0, 80));
-      await cb.evaluate(el => {
-        const label = el.querySelector('.mat-checkbox-label, label, .mat-checkbox-inner-container, .mdc-checkbox, .mat-mdc-checkbox-touch-target');
-        if (label) { label.click(); } else { el.click(); }
-      });
-      await formPage.waitForTimeout(500);
-      console.log(`[Warranty] Mat-checkbox aangevinkt: "${text}"`);
-    }
+    // 8b+8c GECOMBINEERD: Vind ALLE unchecked checkboxes en klik ze correct aan
+    // Strategie: voor elke native input[type="checkbox"], check of het in een mat-checkbox zit.
+    // Zo ja: klik de mat-checkbox wrapper (triggert Angular change detection).
+    // Zo nee: klik het input element direct.
+    const allCbInputs = await formPage.$$('input[type="checkbox"]');
+    console.log(`[Warranty] Totaal checkbox inputs gevonden: ${allCbInputs.length}`);
 
-    // 8c: Unchecked reguliere checkboxes aanvinken
-    const uncheckedCbs = await formPage.$$('input[type="checkbox"]:not(:checked)');
-    console.log(`[Warranty] ${uncheckedCbs.length} unchecked regular checkboxes`);
-    for (const cb of uncheckedCbs) {
-      const text = await cb.evaluate(el => {
-        const label = el.closest('label') || el.closest('mat-checkbox') || el.parentElement;
-        return label ? label.textContent?.trim()?.substring(0, 80) : '';
+    for (const cb of allCbInputs) {
+      const cbInfo = await cb.evaluate(el => {
+        const matCb = el.closest('mat-checkbox');
+        const labelEl = el.closest('label');
+        const wrapper = matCb || labelEl || el.parentElement;
+        return {
+          checked: el.checked,
+          hasMatCheckbox: !!matCb,
+          matCbCheckedClass: matCb ? (matCb.classList.contains('mat-checkbox-checked') || matCb.classList.contains('mat-mdc-checkbox-checked')) : false,
+          labelText: wrapper?.textContent?.trim()?.substring(0, 80) || '',
+          wrapperHTML: wrapper?.outerHTML?.substring(0, 400) || '',
+          inputId: el.id,
+          inputName: el.name
+        };
       });
-      // Klik het checkbox element DIRECT — niet de parent div
-      // (labels zonder for-attribuut togglen de checkbox niet bij click op parent)
-      try {
-        await cb.click({ force: true });
-      } catch (e) {
-        // Fallback: klik via DOM
-        await cb.evaluate(el => el.click());
+      console.log(`[Warranty] Checkbox: checked=${cbInfo.checked}, matCb=${cbInfo.hasMatCheckbox}, matCbChecked=${cbInfo.matCbCheckedClass}, text="${cbInfo.labelText}"`);
+      console.log(`[Warranty] Checkbox DOM: ${cbInfo.wrapperHTML}`);
+
+      // Skip als al aangevinkt (zowel native als Angular-level)
+      if (cbInfo.checked && (!cbInfo.hasMatCheckbox || cbInfo.matCbCheckedClass)) {
+        console.log(`[Warranty] Checkbox al aangevinkt, skip: "${cbInfo.labelText}"`);
+        continue;
       }
-      await formPage.waitForTimeout(500);
-      // Dispatch change event voor Angular change detection
-      await cb.evaluate(el => {
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-      });
-      const isChecked = await cb.evaluate(el => el.checked);
-      console.log(`[Warranty] Checkbox aangevinkt: "${text}" (checked: ${isChecked})`);
-      if (!isChecked) {
-        console.log('[Warranty] WAARSCHUWING: Checkbox nog steeds niet checked na klik, probeer nogmaals...');
-        await cb.evaluate(el => { el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); });
-        await formPage.waitForTimeout(300);
+
+      if (cbInfo.hasMatCheckbox) {
+        // BELANGRIJK: Klik de mat-checkbox wrapper, NIET de native input!
+        // Dit triggert Angular's interne change handler die de FormControl update.
+        console.log(`[Warranty] Klik mat-checkbox wrapper voor: "${cbInfo.labelText}"`);
+        await cb.evaluate(el => {
+          const matCb = el.closest('mat-checkbox');
+          // Probeer de label of mdc-form-field te klikken (meest betrouwbaar)
+          const clickTarget = matCb.querySelector('.mdc-form-field label, .mdc-form-field, .mat-checkbox-layout, label');
+          if (clickTarget) {
+            clickTarget.click();
+          } else {
+            matCb.click();
+          }
+        });
+        await formPage.waitForTimeout(800);
+
+        // Verifieer of Angular het heeft opgepikt
+        const afterClick = await cb.evaluate(el => {
+          const matCb = el.closest('mat-checkbox');
+          return {
+            nativeChecked: el.checked,
+            matCbChecked: matCb ? (matCb.classList.contains('mat-checkbox-checked') || matCb.classList.contains('mat-mdc-checkbox-checked')) : false,
+            ariaChecked: matCb?.getAttribute('aria-checked') || el.getAttribute('aria-checked')
+          };
+        });
+        console.log(`[Warranty] Na mat-checkbox klik: native=${afterClick.nativeChecked}, matCb=${afterClick.matCbChecked}, aria=${afterClick.ariaChecked}`);
+
+        // Als mat-checkbox wrapper-klik niet werkte, probeer Playwright click op wrapper element
+        if (!afterClick.nativeChecked || !afterClick.matCbChecked) {
+          console.log('[Warranty] Mat-checkbox wrapper klik niet succesvol, probeer Playwright click...');
+          const matWrapper = await cb.evaluateHandle(el => el.closest('mat-checkbox'));
+          try {
+            await matWrapper.asElement().click({ force: true });
+            await formPage.waitForTimeout(500);
+          } catch (e) {
+            console.log(`[Warranty] Playwright mat-checkbox click fout: ${e.message}`);
+          }
+        }
+
+        // Als het ALSNOG niet werkt, forceer native + dispatch Angular events
+        const finalCheck = await cb.evaluate(el => el.checked);
+        if (!finalCheck) {
+          console.log('[Warranty] Forceer checkbox checked + Angular events...');
+          await cb.evaluate(el => {
+            el.checked = true;
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            // Probeer ook Angular zone te triggeren
+            const matCb = el.closest('mat-checkbox');
+            if (matCb) {
+              matCb.classList.add('mat-checkbox-checked', 'mat-mdc-checkbox-checked');
+              matCb.setAttribute('aria-checked', 'true');
+            }
+          });
+          await formPage.waitForTimeout(300);
+        }
+      } else {
+        // Gewone checkbox (geen mat-checkbox wrapper) — klik direct
+        console.log(`[Warranty] Klik gewone checkbox: "${cbInfo.labelText}"`);
+        try {
+          await cb.click({ force: true });
+        } catch (e) {
+          await cb.evaluate(el => el.click());
+        }
+        await formPage.waitForTimeout(500);
+        await cb.evaluate(el => {
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        const isChecked = await cb.evaluate(el => el.checked);
+        console.log(`[Warranty] Checkbox result: checked=${isChecked}`);
+        if (!isChecked) {
+          await cb.evaluate(el => { el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); });
+        }
       }
     }
 
     // Als formPage !== warrantyPage, doe hetzelfde op warrantyPage
     if (formPage !== warrantyPage) {
       const wpToggles = await warrantyPage.$$('mat-slide-toggle:not(.mat-checked):not(.mat-mdc-slide-toggle-checked), .mat-slide-toggle:not(.mat-checked), .mat-mdc-slide-toggle:not(.mat-mdc-slide-toggle-checked)');
-      const wpMatCbs = await warrantyPage.$$('mat-checkbox:not(.mat-checkbox-checked), .mat-checkbox:not(.mat-checkbox-checked)');
-      const wpCbs = await warrantyPage.$$('input[type="checkbox"]:not(:checked)');
-      console.log(`[Warranty] warrantyPage extra: ${wpToggles.length} toggles, ${wpMatCbs.length} mat-cb, ${wpCbs.length} cb`);
+      const wpCbs = await warrantyPage.$$('input[type="checkbox"]');
+      console.log(`[Warranty] warrantyPage extra: ${wpToggles.length} toggles, ${wpCbs.length} checkboxes`);
       for (const t of wpToggles) {
         await t.evaluate(el => { const l = el.querySelector('.mat-slide-toggle-label, label'); if (l) l.click(); else el.click(); });
         await warrantyPage.waitForTimeout(500);
       }
-      for (const c of wpMatCbs) {
-        await c.evaluate(el => { const l = el.querySelector('.mat-checkbox-label, label, .mat-checkbox-inner-container'); if (l) l.click(); else el.click(); });
-        await warrantyPage.waitForTimeout(500);
-      }
       for (const c of wpCbs) {
-        try { await c.click({ force: true }); } catch (e) { await c.evaluate(el => el.click()); }
+        const isChecked = await c.evaluate(el => el.checked);
+        if (isChecked) continue;
+        // Klik mat-checkbox wrapper als die er is
+        await c.evaluate(el => {
+          const matCb = el.closest('mat-checkbox');
+          if (matCb) {
+            const target = matCb.querySelector('.mdc-form-field label, .mdc-form-field, .mat-checkbox-layout, label');
+            if (target) target.click(); else matCb.click();
+          } else {
+            el.click();
+          }
+        });
         await warrantyPage.waitForTimeout(500);
         await c.evaluate(el => { el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('input', { bubbles: true })); });
       }
     }
 
     // ══════════════════════════════════════════════════════════════
-    // STAP 8d: Verificatie vóór submit
+    // STAP 8d: Verificatie + Angular form debugging vóór submit
     // ══════════════════════════════════════════════════════════════
     const verifyKm = await formPage.locator('input[type="number"]:not([disabled])').first().inputValue().catch(() => '');
     const verifyEmail = await formPage.locator('input[type="email"]:not([disabled])').first().inputValue().catch(() => '');
@@ -2930,6 +3000,142 @@ async function activateWarranty(vin, kmStand, customerEmail) {
           el.dispatchEvent(new Event('input', { bubbles: true }));
         });
       });
+      await formPage.waitForTimeout(500);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // STAP 8e: Angular form validatie debugging
+    // ══════════════════════════════════════════════════════════════
+    const angularDebug = await formPage.evaluate(() => {
+      const result = {};
+
+      // 1. Zoek alle ng-invalid elementen (= Angular form controls die niet valid zijn)
+      const invalids = [];
+      document.querySelectorAll('.ng-invalid:not(form):not(fieldset)').forEach(el => {
+        invalids.push({
+          tag: el.tagName?.toLowerCase(),
+          type: el.type || '',
+          name: el.name || '',
+          id: el.id || '',
+          classes: el.className?.substring(0, 150),
+          text: el.textContent?.trim()?.substring(0, 60) || '',
+          value: el.value !== undefined ? String(el.value).substring(0, 50) : '',
+          checked: el.checked,
+          hidden: el.hidden || el.offsetParent === null,
+          required: el.required || el.hasAttribute('required')
+        });
+      });
+      result.invalidControls = invalids;
+
+      // 2. Check of het hele form valid is
+      const form = document.querySelector('form');
+      if (form) {
+        result.formValid = form.checkValidity();
+        result.formClasses = form.className?.substring(0, 100);
+        result.formNgInvalid = form.classList.contains('ng-invalid');
+      }
+
+      // 3. Check submit button state
+      const submitBtns = Array.from(document.querySelectorAll('button'));
+      result.buttons = submitBtns.map(b => ({
+        text: b.textContent?.trim()?.substring(0, 40),
+        disabled: b.disabled,
+        type: b.type,
+        classes: b.className?.substring(0, 100)
+      }));
+
+      // 4. Zoek Angular error messages (mat-error, mat-hint met error)
+      const errors = [];
+      document.querySelectorAll('mat-error, .mat-error, .mat-mdc-form-field-error, [role="alert"]').forEach(el => {
+        errors.push(el.textContent?.trim()?.substring(0, 100));
+      });
+      result.errorMessages = errors;
+
+      // 5. Probeer Angular form controls te inspecteren via ng.getComponent
+      try {
+        if (typeof ng !== 'undefined' && ng.getComponent) {
+          const formEl = document.querySelector('form');
+          if (formEl) {
+            const comp = ng.getComponent(formEl) || ng.getOwningComponent(formEl);
+            if (comp) {
+              // Zoek reactive form properties
+              for (const key of Object.keys(comp)) {
+                const val = comp[key];
+                if (val && val.controls) {
+                  const controls = {};
+                  for (const [name, ctrl] of Object.entries(val.controls)) {
+                    controls[name] = { valid: ctrl.valid, value: ctrl.value, errors: ctrl.errors };
+                  }
+                  result.angularFormControls = controls;
+                  break;
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        result.ngError = e.message;
+      }
+
+      // 6. Zoek alle form-field wrappers met error state
+      const matFormFields = [];
+      document.querySelectorAll('mat-form-field').forEach(el => {
+        const hasError = el.classList.contains('mat-form-field-invalid') || el.classList.contains('mat-mdc-form-field-error');
+        if (hasError) {
+          matFormFields.push({
+            label: el.querySelector('mat-label, label')?.textContent?.trim()?.substring(0, 60),
+            error: el.querySelector('mat-error')?.textContent?.trim()
+          });
+        }
+      });
+      result.invalidFormFields = matFormFields;
+
+      return result;
+    });
+    console.log(`[Warranty] ANGULAR FORM DEBUG: ${JSON.stringify(angularDebug)}`);
+
+    // Als er ng-invalid controls zijn, probeer ze te fixen
+    if (angularDebug.invalidControls && angularDebug.invalidControls.length > 0) {
+      console.log(`[Warranty] ${angularDebug.invalidControls.length} ongeldige Angular form controls gevonden!`);
+
+      // Probeer Angular form controls programmatisch te zetten via ng API
+      const fixResult = await formPage.evaluate(() => {
+        try {
+          if (typeof ng === 'undefined' || !ng.getComponent) return 'ng API niet beschikbaar';
+
+          const formEl = document.querySelector('form');
+          if (!formEl) return 'geen form element';
+
+          const comp = ng.getComponent(formEl) || ng.getOwningComponent(formEl);
+          if (!comp) return 'geen Angular component gevonden';
+
+          // Zoek het FormGroup object
+          let formGroup = null;
+          for (const key of Object.keys(comp)) {
+            const val = comp[key];
+            if (val && val.controls && typeof val.markAllAsTouched === 'function') {
+              formGroup = val;
+              break;
+            }
+          }
+          if (!formGroup) return 'geen FormGroup gevonden';
+
+          // Zet alle boolean controls op true (voor checkboxes/toggles)
+          const fixed = [];
+          for (const [name, ctrl] of Object.entries(formGroup.controls)) {
+            if (!ctrl.valid && (ctrl.value === false || ctrl.value === null || ctrl.value === '')) {
+              if (typeof ctrl.value === 'boolean' || ctrl.value === null) {
+                ctrl.setValue(true);
+                fixed.push(name);
+              }
+            }
+          }
+          return fixed.length > 0 ? `Fixed controls: ${fixed.join(', ')}` : 'geen fixbare controls';
+        } catch (e) {
+          return `fix error: ${e.message}`;
+        }
+      });
+      console.log(`[Warranty] Angular form fix poging: ${fixResult}`);
       await formPage.waitForTimeout(500);
     }
 
@@ -3009,14 +3215,30 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     // 3. Formulier nog zichtbaar → niet ingediend (bijv. verplicht veld niet gevuld)
     if (/Gebruiksvoorwaarden/i.test(resultText) || /Formulier indienen/i.test(resultText)) {
       console.log(`[Warranty] Formulier niet ingediend — verplicht veld niet gevuld`);
-      // Log welke checkboxes er zijn en hun status
-      const finalCbState = await warrantyPage.evaluate(() => {
-        return Array.from(document.querySelectorAll('input[type="checkbox"]')).map(el => ({
-          checked: el.checked,
-          text: (el.closest('label') || el.closest('mat-checkbox') || el.parentElement)?.textContent?.trim()?.substring(0, 80) || ''
+      // Uitgebreide diagnostiek bij fout
+      const finalDebug = await warrantyPage.evaluate(() => {
+        const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]')).map(el => {
+          const matCb = el.closest('mat-checkbox');
+          return {
+            checked: el.checked,
+            matCbChecked: matCb ? (matCb.classList.contains('mat-checkbox-checked') || matCb.classList.contains('mat-mdc-checkbox-checked')) : null,
+            text: (matCb || el.closest('label') || el.parentElement)?.textContent?.trim()?.substring(0, 80) || ''
+          };
+        });
+        const ngInvalids = Array.from(document.querySelectorAll('.ng-invalid:not(form):not(fieldset)')).map(el => ({
+          tag: el.tagName?.toLowerCase(),
+          type: el.type || '',
+          name: el.name || '',
+          text: el.textContent?.trim()?.substring(0, 60),
+          hidden: el.offsetParent === null
         }));
+        const matErrors = Array.from(document.querySelectorAll('mat-error, .mat-error, [role="alert"]'))
+          .map(el => el.textContent?.trim()?.substring(0, 100));
+        return { checkboxes, ngInvalids, matErrors };
       });
-      console.log(`[Warranty] Checkbox states bij fout: ${JSON.stringify(finalCbState)}`);
+      console.log(`[Warranty] FOUT DEBUG - Checkboxes: ${JSON.stringify(finalDebug.checkboxes)}`);
+      console.log(`[Warranty] FOUT DEBUG - ng-invalid: ${JSON.stringify(finalDebug.ngInvalids)}`);
+      console.log(`[Warranty] FOUT DEBUG - Mat errors: ${JSON.stringify(finalDebug.matErrors)}`);
       await warrantyPage.screenshot({ path: `warranty-form-stuck-${Date.now()}.png` });
       await browser.close();
       return {
