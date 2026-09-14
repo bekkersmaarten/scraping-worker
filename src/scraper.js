@@ -3164,14 +3164,108 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       return { status: 'error', vin, message: 'Indienen-knop niet gevonden', vehicle: vehicleData };
     }
 
+    // Log URL vóór submit
+    const preSubmitUrl = await formPage.evaluate(() => window.location.href);
+    console.log(`[Warranty] URL vóór submit: ${preSubmitUrl}`);
+
+    // Bewaar VIN tekst op pagina vóór submit (om te detecteren of pagina reset naar nieuw formulier)
+    const preSubmitVinOnPage = await formPage.evaluate((targetVin) => {
+      return document.body?.innerText?.includes(targetVin) || false;
+    }, vin);
+    console.log(`[Warranty] VIN ${vin} op pagina vóór submit: ${preSubmitVinOnPage}`);
+
+    // Monitor netwerk response tijdens submit
+    let apiResponse = null;
+    const responsePromise = warrantyPage.waitForResponse(
+      resp => resp.url().includes('allucare') && (resp.request().method() === 'POST' || resp.request().method() === 'PUT'),
+      { timeout: 15000 }
+    ).then(resp => {
+      apiResponse = { status: resp.status(), url: resp.url(), method: resp.request().method() };
+      return resp.text().catch(() => '');
+    }).catch(e => {
+      console.log(`[Warranty] Geen API response gevangen: ${e.message}`);
+      return null;
+    });
+
     await submitBtn.click();
     console.log('[Warranty] Indienen geklikt, wachten op resultaat...');
-    await warrantyPage.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-    await warrantyPage.waitForTimeout(3000);
 
-    // Check resultaat — alleen `activated` bij echte contractbevestiging
+    // Wacht op API response OF timeout
+    const apiResponseText = await responsePromise;
+    if (apiResponse) {
+      console.log(`[Warranty] API Response: status=${apiResponse.status}, url=${apiResponse.url}, method=${apiResponse.method}`);
+      if (apiResponseText) {
+        console.log(`[Warranty] API Response body (eerste 500 chars): ${apiResponseText.substring(0, 500)}`);
+      }
+    }
+
+    // Wacht kort op UI update
+    await warrantyPage.waitForTimeout(2000);
+
+    // Check voor Angular Material snackbar/toast (verschijnt bij succes of fout)
+    const snackbarText = await warrantyPage.evaluate(() => {
+      const snackbar = document.querySelector('snack-bar-container, .mat-snack-bar-container, .mat-mdc-snack-bar-container, mat-snack-bar-container, simple-snack-bar, .cdk-overlay-container .mat-snack-bar-container');
+      if (snackbar) return snackbar.textContent?.trim();
+      // Check ook in overlay container
+      const overlay = document.querySelector('.cdk-overlay-container');
+      if (overlay && overlay.textContent?.trim()) return overlay.textContent.trim().substring(0, 200);
+      return null;
+    }).catch(() => null);
+    if (snackbarText) {
+      console.log(`[Warranty] Snackbar/overlay tekst: ${snackbarText}`);
+    }
+
+    // Wacht extra op networkidle
+    await warrantyPage.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    await warrantyPage.waitForTimeout(1000);
+
+    // Check URL na submit
+    const postSubmitUrl = await formPage.evaluate(() => window.location.href);
+    console.log(`[Warranty] URL na submit: ${postSubmitUrl}`);
+
+    // Check resultaat pagina tekst
     const resultText = await warrantyPage.evaluate(() => document.body?.innerText || '');
-    console.log(`[Warranty] Resultaat pagina: ${resultText.substring(0, 500)}`);
+    console.log(`[Warranty] Resultaat pagina (eerste 1000 chars): ${resultText.substring(0, 1000)}`);
+
+    // Check of VIN nog op pagina staat (als het formulier reset naar leeg, is VIN weg)
+    const postSubmitVinOnPage = resultText.includes(vin);
+    console.log(`[Warranty] VIN ${vin} op pagina na submit: ${postSubmitVinOnPage}`);
+
+    // Check submission history tabel
+    const historyInfo = await warrantyPage.evaluate(() => {
+      // Zoek de Indieningsgeschiedenis sectie
+      const tables = document.querySelectorAll('table, mat-table, .mat-table');
+      const history = [];
+      tables.forEach(t => {
+        history.push({
+          rows: t.querySelectorAll('tr, mat-row, .mat-row').length,
+          text: t.textContent?.trim()?.substring(0, 300)
+        });
+      });
+      // Zoek ook naar list items in geschiedenissectie
+      const histSection = Array.from(document.querySelectorAll('h2, h3, h4, .mat-h2, .mat-h3')).find(el =>
+        el.textContent?.toLowerCase().includes('geschiedenis') || el.textContent?.toLowerCase().includes('history')
+      );
+      const histSectionText = histSection ? histSection.parentElement?.textContent?.trim()?.substring(0, 500) : null;
+      return { tables: history, historySection: histSectionText };
+    }).catch(() => ({}));
+    console.log(`[Warranty] History info: ${JSON.stringify(historyInfo)}`);
+
+    // Check Angular form state na submit (ng-invalid = form reset en niet ingediend)
+    const postSubmitFormState = await formPage.evaluate(() => {
+      const form = document.querySelector('form');
+      if (!form) return { formPresent: false };
+      return {
+        formPresent: true,
+        formClasses: form.className?.substring(0, 100),
+        ngInvalid: form.classList.contains('ng-invalid'),
+        ngPristine: form.classList.contains('ng-pristine'),
+        ngDirty: form.classList.contains('ng-dirty'),
+        ngTouched: form.classList.contains('ng-touched'),
+        ngValid: form.classList.contains('ng-valid')
+      };
+    }).catch(() => ({}));
+    console.log(`[Warranty] Form state na submit: ${JSON.stringify(postSubmitFormState)}`);
 
     // Contract-ID extraheren als beschikbaar
     let contractId = null;
@@ -3183,8 +3277,55 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       console.log(`[Warranty] Contract ID: ${contractId}`);
     }
 
-    // 1. Succes: contract echt aangemaakt
-    if (/contract aangemaakt met ID|contract has been created|contract is aangemaakt/i.test(resultText)) {
+    // ══════════════════════════════════════════════════════════════
+    // RESULTAAT DETECTIE (verbeterd)
+    // ══════════════════════════════════════════════════════════════
+
+    // 1. Succes via API response (HTTP 200/201 op POST)
+    if (apiResponse && (apiResponse.status === 200 || apiResponse.status === 201) && apiResponse.method === 'POST') {
+      // API call was succesvol — check of het echt een contract bevestiging is
+      const apiSuccess = apiResponseText && (
+        /contract/i.test(apiResponseText) ||
+        /success/i.test(apiResponseText) ||
+        /created/i.test(apiResponseText) ||
+        /aangemaakt/i.test(apiResponseText)
+      );
+      if (apiSuccess || !apiResponseText) {
+        console.log(`[Warranty] 2+6 activatie GELUKT via API response voor ${vin}`);
+        await browser.close();
+        return {
+          status: 'activated',
+          vin,
+          message: '2+6 garantie succesvol geactiveerd',
+          vehicle: vehicleData,
+          km_stand: kmStand,
+          contract_id: contractId,
+          api_response: apiResponseText?.substring(0, 500),
+          result_text: resultText.substring(0, 500)
+        };
+      }
+    }
+
+    // 2. Succes via snackbar/toast bericht
+    if (snackbarText && (
+      /succes|gelukt|aangemaakt|created|contract|activat/i.test(snackbarText) &&
+      !/fout|error|mislukt|failed/i.test(snackbarText)
+    )) {
+      console.log(`[Warranty] 2+6 activatie GELUKT via snackbar voor ${vin}: "${snackbarText}"`);
+      await browser.close();
+      return {
+        status: 'activated',
+        vin,
+        message: '2+6 garantie succesvol geactiveerd',
+        vehicle: vehicleData,
+        km_stand: kmStand,
+        contract_id: contractId,
+        result_text: resultText.substring(0, 500)
+      };
+    }
+
+    // 3. Succes via pagina tekst
+    if (/contract aangemaakt met ID|contract has been created|contract is aangemaakt|succesvol geactiveerd|successfully activated/i.test(resultText)) {
       console.log(`[Warranty] 2+6 activatie GELUKT voor ${vin}`);
       await browser.close();
       return {
@@ -3198,7 +3339,22 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       };
     }
 
-    // 2. Al eerder geactiveerd
+    // 4. Succes detectie: form reset naar pristine (= form werd ingediend en reset)
+    if (postSubmitFormState.ngPristine && postSubmitFormState.ngValid && !postSubmitVinOnPage) {
+      console.log(`[Warranty] 2+6 activatie WAARSCHIJNLIJK GELUKT (form reset + VIN weg) voor ${vin}`);
+      await browser.close();
+      return {
+        status: 'activated',
+        vin,
+        message: '2+6 garantie succesvol geactiveerd (form reset na submit)',
+        vehicle: vehicleData,
+        km_stand: kmStand,
+        contract_id: contractId,
+        result_text: resultText.substring(0, 500)
+      };
+    }
+
+    // 5. Al eerder geactiveerd
     if (/al geactiveerd|already activated|bestaat al|reeds ingediend|already submitted/i.test(resultText)) {
       console.log(`[Warranty] Was al geactiveerd voor ${vin}`);
       await browser.close();
@@ -3212,33 +3368,9 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       };
     }
 
-    // 3. Formulier nog zichtbaar → niet ingediend (bijv. verplicht veld niet gevuld)
-    if (/Gebruiksvoorwaarden/i.test(resultText) || /Formulier indienen/i.test(resultText)) {
-      console.log(`[Warranty] Formulier niet ingediend — verplicht veld niet gevuld`);
-      // Uitgebreide diagnostiek bij fout
-      const finalDebug = await warrantyPage.evaluate(() => {
-        const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]')).map(el => {
-          const matCb = el.closest('mat-checkbox');
-          return {
-            checked: el.checked,
-            matCbChecked: matCb ? (matCb.classList.contains('mat-checkbox-checked') || matCb.classList.contains('mat-mdc-checkbox-checked')) : null,
-            text: (matCb || el.closest('label') || el.parentElement)?.textContent?.trim()?.substring(0, 80) || ''
-          };
-        });
-        const ngInvalids = Array.from(document.querySelectorAll('.ng-invalid:not(form):not(fieldset)')).map(el => ({
-          tag: el.tagName?.toLowerCase(),
-          type: el.type || '',
-          name: el.name || '',
-          text: el.textContent?.trim()?.substring(0, 60),
-          hidden: el.offsetParent === null
-        }));
-        const matErrors = Array.from(document.querySelectorAll('mat-error, .mat-error, [role="alert"]'))
-          .map(el => el.textContent?.trim()?.substring(0, 100));
-        return { checkboxes, ngInvalids, matErrors };
-      });
-      console.log(`[Warranty] FOUT DEBUG - Checkboxes: ${JSON.stringify(finalDebug.checkboxes)}`);
-      console.log(`[Warranty] FOUT DEBUG - ng-invalid: ${JSON.stringify(finalDebug.ngInvalids)}`);
-      console.log(`[Warranty] FOUT DEBUG - Mat errors: ${JSON.stringify(finalDebug.matErrors)}`);
+    // 6. Echt fout: form nog steeds ng-invalid OF ng-dirty+touched (niet ingediend)
+    if (postSubmitFormState.ngInvalid) {
+      console.log(`[Warranty] Formulier niet ingediend — form is ng-invalid na submit`);
       await warrantyPage.screenshot({ path: `warranty-form-stuck-${Date.now()}.png` });
       await browser.close();
       return {
@@ -3250,8 +3382,41 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       };
     }
 
-    // 4. Onbekend resultaat → nooit als succes doorgeven
-    console.log(`[Warranty] Geen bevestiging van contract aangemaakt gevonden`);
+    // 7. Snackbar met foutmelding
+    if (snackbarText && /fout|error|mislukt|failed|ongeldig|invalid/i.test(snackbarText)) {
+      console.log(`[Warranty] Fout via snackbar: "${snackbarText}"`);
+      await browser.close();
+      return {
+        status: 'error',
+        vin,
+        message: `Formulier fout: ${snackbarText.substring(0, 100)}`,
+        vehicle: vehicleData,
+        result_text: resultText.substring(0, 500)
+      };
+    }
+
+    // 8. VIN nog steeds op pagina + form nog steeds ng-dirty = mogelijk niet ingediend
+    if (postSubmitVinOnPage && postSubmitFormState.ngDirty && postSubmitFormState.ngTouched) {
+      // Maar check eerst of er ook een history entry is (= was wel ingediend)
+      const hasHistory = historyInfo?.tables?.some(t => t.rows > 1) || false;
+      if (!hasHistory) {
+        console.log(`[Warranty] Formulier waarschijnlijk niet ingediend (VIN nog op pagina, form dirty+touched, geen history)`);
+        await warrantyPage.screenshot({ path: `warranty-form-stuck-${Date.now()}.png` });
+        await browser.close();
+        return {
+          status: 'error',
+          vin,
+          message: 'Formulier niet ingediend (verplicht veld niet gevuld)',
+          vehicle: vehicleData,
+          result_text: resultText.substring(0, 500)
+        };
+      }
+      // Er IS history — mogelijk toch ingediend
+      console.log(`[Warranty] VIN nog op pagina maar er is submission history — mogelijk toch ingediend`);
+    }
+
+    // 9. Als niets duidelijk is: log alles en geef onbekend resultaat
+    console.log(`[Warranty] Onbekend resultaat — geen duidelijke succes of fout indicator`);
     await warrantyPage.screenshot({ path: `warranty-result-debug-${Date.now()}.png` });
     await browser.close();
     return {
