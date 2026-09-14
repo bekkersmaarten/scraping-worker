@@ -2437,6 +2437,34 @@ async function activateWarranty(vin, kmStand, customerEmail) {
       return { status: 'error', vin, message: 'SSO login mislukt — kon niet doorverwijzen naar formulier', vehicle: vehicleData };
     }
 
+    // ── Wacht tot Angular SPA het formulier rendert (max 30s) ──
+    // De pagina is op allucare-dmbr.stellantis.com/ maar de Angular form
+    // component moet nog bootstrappen, API calls doen, en renderen.
+    console.log('[Warranty] Wachten tot Angular formulier rendert...');
+    let formRendered = false;
+    for (let waitAttempt = 1; waitAttempt <= 15; waitAttempt++) {
+      const hasForm = await warrantyPage.evaluate(() => {
+        const body = document.body?.innerText || '';
+        const hasLabels = body.includes('Gebruiksvoorwaarden') || body.includes('Kilometerstand') || body.includes('kilometerstand');
+        const hasToggles = document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle, .mat-mdc-slide-toggle').length > 0;
+        const hasInputs = document.querySelectorAll('input[type="number"], input[type="email"]').length > 0;
+        return { hasLabels, hasToggles, hasInputs, bodyLength: body.length };
+      });
+
+      if (hasForm.hasLabels || hasForm.hasToggles || hasForm.hasInputs) {
+        console.log(`[Warranty] Formulier gerenderd na ${waitAttempt * 2}s (labels: ${hasForm.hasLabels}, toggles: ${hasForm.hasToggles}, inputs: ${hasForm.hasInputs})`);
+        formRendered = true;
+        break;
+      }
+
+      console.log(`[Warranty] Formulier nog niet gerenderd (poging ${waitAttempt}/15, body: ${hasForm.bodyLength} chars)`);
+      await warrantyPage.waitForTimeout(2000);
+    }
+
+    if (!formRendered) {
+      console.log('[Warranty] WAARSCHUWING: Formulier niet gerenderd na 30s, ga toch door...');
+    }
+
     const pageContent = await warrantyPage.evaluate(() => document.body?.innerText || '');
     console.log(`[Warranty] Formulier content (eerste 500 chars): ${pageContent.substring(0, 500)}`);
 
