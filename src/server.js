@@ -110,7 +110,8 @@ app.get('/debug-frequency', async (req, res) => {
  * }
  */
 app.post('/scrape', async (req, res) => {
-  const { lookup_id, kenteken, vin, km_stand, callback_url, callback_secret, only_frequency } = req.body;
+  const { lookup_id, kenteken, vin, km_stand, callback_url, callback_secret, only_frequency, servicebox_username, servicebox_password } = req.body;
+  const credentials = servicebox_username ? { username: servicebox_username, password: servicebox_password } : {};
 
   if (!lookup_id || (!kenteken && !vin)) {
     return res.status(400).json({ error: 'lookup_id en kenteken of vin zijn verplicht' });
@@ -137,10 +138,10 @@ app.post('/scrape', async (req, res) => {
   try {
     const result = await enqueue(async () => {
       if (only_frequency && kenteken) {
-        return await scrapeFrequencyOnly(kenteken);
+        return await scrapeFrequencyOnly(kenteken, credentials);
       }
       return kenteken
-        ? await scrapeServicebox(kenteken, km_stand)
+        ? await scrapeServicebox(kenteken, km_stand, credentials)
         : await scrapeQuotelink(vin, km_stand);
     });
 
@@ -214,7 +215,8 @@ app.post('/scrape', async (req, res) => {
  * }
  */
 app.post('/activate-warranty', async (req, res) => {
-  const { lookup_id, vin, km_stand, customer_email, callback_url, callback_secret } = req.body;
+  const { lookup_id, vin, km_stand, customer_email, callback_url, callback_secret, servicebox_username, servicebox_password } = req.body;
+  const credentials = servicebox_username ? { username: servicebox_username, password: servicebox_password } : {};
 
   if (!lookup_id || !vin) {
     return res.status(400).json({ error: 'lookup_id en vin zijn verplicht' });
@@ -243,7 +245,7 @@ app.post('/activate-warranty', async (req, res) => {
   // Voeg toe aan queue (max 1 browser tegelijk)
   try {
     const result = await enqueue(async () => {
-      return await activateWarranty(vin, km_stand, customer_email);
+      return await activateWarranty(vin, km_stand, customer_email, credentials);
     });
 
     console.log(`[Server] Warranty activatie voltooid: ${result.status}`);

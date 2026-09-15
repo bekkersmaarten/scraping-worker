@@ -13,8 +13,8 @@ const pdfParse = require('pdf-parse');
  */
 
 const SERVICEBOX_URL = process.env.SERVICEBOX_URL || 'https://servicebox.mpsa.com';
-const USERNAME = process.env.SERVICEBOX_USERNAME;
-const PASSWORD = process.env.SERVICEBOX_PASSWORD;
+const DEFAULT_USERNAME = process.env.SERVICEBOX_USERNAME;
+const DEFAULT_PASSWORD = process.env.SERVICEBOX_PASSWORD;
 
 /**
  * Vertaal Playwright / technische fouten naar korte NL-meldingen.
@@ -56,12 +56,15 @@ function sanitizeErrorMessage(rawMessage) {
   return firstLine;
 }
 
-async function scrapeServicebox(kenteken, kmStand) {
+async function scrapeServicebox(kenteken, kmStand, credentials = {}) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '0');
+  const USERNAME = credentials.username || DEFAULT_USERNAME;
+  const PASSWORD = credentials.password || DEFAULT_PASSWORD;
 
   console.log(`[Scraper] Start scrape voor kenteken: ${kenteken}, km: ${kmStand || 'n.v.t.'}`);
   console.log(`[Scraper] Headless: ${headless}, SlowMo: ${slowMo}`);
+  console.log(`[Scraper] Credentials: ${credentials.username ? 'custom' : 'default'}`);
 
   const browser = await chromium.launch({ headless, slowMo });
   const context = await browser.newContext({
@@ -2080,11 +2083,14 @@ async function scrapeQuotelink(vin, kmStand) {
  *
  * Returns: { status, vin, message, vehicle, contract_info }
  */
-async function activateWarranty(vin, kmStand, customerEmail) {
+async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '250');
+  const USERNAME = credentials.username || DEFAULT_USERNAME;
+  const PASSWORD = credentials.password || DEFAULT_PASSWORD;
 
   console.log(`[Warranty] Start 2+6 activatie: ${vin}, km: ${kmStand}, email: ${customerEmail ? '***' : 'GEEN'}`);
+  console.log(`[Warranty] Credentials: ${credentials.username ? 'custom' : 'default'}`);
 
   if (!customerEmail) {
     return { status: 'skipped', vin, message: 'Geen e-mailadres opgegeven (verplicht veld)' };
@@ -3379,13 +3385,16 @@ async function activateWarranty(vin, kmStand, customerEmail) {
  * Snelle modus voor bulk lookups: login → kenteken zoeken → Documentatie PDF → km/maanden.
  * Skipt: recalls, Menu Pricing, ESA, interval extractie.
  */
-async function scrapeFrequencyOnly(kenteken) {
+async function scrapeFrequencyOnly(kenteken, credentials = {}) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '0');
   const debugLog = [];
+  const USERNAME = credentials.username || DEFAULT_USERNAME;
+  const PASSWORD = credentials.password || DEFAULT_PASSWORD;
 
   console.log(`[FrequencyOnly] Start frequentie-only scrape voor kenteken: ${kenteken}`);
   console.log(`[FrequencyOnly] Headless: ${headless}, SlowMo: ${slowMo}`);
+  console.log(`[FrequencyOnly] Credentials: ${credentials.username ? 'custom' : 'default'}`);
 
   const browser = await chromium.launch({ headless, slowMo });
   const context = await browser.newContext({
