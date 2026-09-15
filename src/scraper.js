@@ -57,8 +57,8 @@ function sanitizeErrorMessage(rawMessage) {
 async function scrapeServicebox(kenteken, kmStand, credentials = {}) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '0');
-  const USERNAME = credentials.username || process.env.SERVICEBOX_USERNAME;
-  const PASSWORD = credentials.password || process.env.SERVICEBOX_PASSWORD;
+  const USERNAME = credentials.username;
+  const PASSWORD = credentials.password;
 
   if (!USERNAME || !PASSWORD) {
     throw new Error('Servicebox credentials zijn verplicht. Stel deze in via Instellingen.');
@@ -2088,8 +2088,8 @@ async function scrapeQuotelink(vin, kmStand) {
 async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '250');
-  const USERNAME = credentials.username || process.env.SERVICEBOX_USERNAME;
-  const PASSWORD = credentials.password || process.env.SERVICEBOX_PASSWORD;
+  const USERNAME = credentials.username;
+  const PASSWORD = credentials.password;
 
   if (!USERNAME || !PASSWORD) {
     throw new Error('Servicebox credentials zijn verplicht. Stel deze in via Instellingen.');
@@ -3395,8 +3395,8 @@ async function scrapeFrequencyOnly(kenteken, credentials = {}) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '0');
   const debugLog = [];
-  const USERNAME = credentials.username || process.env.SERVICEBOX_USERNAME;
-  const PASSWORD = credentials.password || process.env.SERVICEBOX_PASSWORD;
+  const USERNAME = credentials.username;
+  const PASSWORD = credentials.password;
 
   if (!USERNAME || !PASSWORD) {
     throw new Error('Servicebox credentials zijn verplicht. Stel deze in via Instellingen.');
