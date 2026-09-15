@@ -96,6 +96,8 @@ app.get('/debug-frequency', async (req, res) => {
  *   "lookup_id": "uuid",
  *   "kenteken": "KR342F",
  *   "km_stand": 34000,
+ *   "servicebox_username": "DF21261",
+ *   "servicebox_password": "...",
  *   "callback_url": "https://xxx.supabase.co/functions/v1/worker-callback",
  *   "callback_secret": "secret"
  * }
@@ -105,16 +107,29 @@ app.get('/debug-frequency', async (req, res) => {
  *   "lookup_id": "uuid",
  *   "vin": "W0L000000Y2000001",
  *   "km_stand": 34000,
+ *   "servicebox_username": "DF21261",
+ *   "servicebox_password": "...",
  *   "callback_url": "...",
  *   "callback_secret": "secret"
  * }
  */
 app.post('/scrape', async (req, res) => {
   const { lookup_id, kenteken, vin, km_stand, callback_url, callback_secret, only_frequency, servicebox_username, servicebox_password } = req.body;
-  const credentials = servicebox_username ? { username: servicebox_username, password: servicebox_password } : {};
+
+  // Credentials uit request, of tijdelijke fallback naar env vars (verwijder na migratie)
+  const sbUser = servicebox_username || process.env.SERVICEBOX_USERNAME;
+  const sbPass = servicebox_password || process.env.SERVICEBOX_PASSWORD;
+  if (!servicebox_username && process.env.SERVICEBOX_USERNAME) {
+    console.log('[Server] ⚠️  WAARSCHUWING: Geen credentials in request, tijdelijke fallback naar env vars');
+  }
+  const credentials = { username: sbUser, password: sbPass };
 
   if (!lookup_id || (!kenteken && !vin)) {
     return res.status(400).json({ error: 'lookup_id en kenteken of vin zijn verplicht' });
+  }
+
+  if (!sbUser || !sbPass) {
+    return res.status(400).json({ error: 'servicebox_username en servicebox_password zijn verplicht' });
   }
 
   const searchType = kenteken ? 'kenteken' : 'vin';
@@ -210,13 +225,22 @@ app.post('/scrape', async (req, res) => {
  *   "vin": "VXKUPHPY9S4259523",
  *   "km_stand": 45000,
  *   "customer_email": "klant@example.com",
+ *   "servicebox_username": "DF21261",
+ *   "servicebox_password": "...",
  *   "callback_url": "https://xxx.supabase.co/functions/v1/worker-callback",
  *   "callback_secret": "secret"
  * }
  */
 app.post('/activate-warranty', async (req, res) => {
   const { lookup_id, vin, km_stand, customer_email, callback_url, callback_secret, servicebox_username, servicebox_password } = req.body;
-  const credentials = servicebox_username ? { username: servicebox_username, password: servicebox_password } : {};
+
+  // Credentials uit request, of tijdelijke fallback naar env vars (verwijder na migratie)
+  const sbUser = servicebox_username || process.env.SERVICEBOX_USERNAME;
+  const sbPass = servicebox_password || process.env.SERVICEBOX_PASSWORD;
+  if (!servicebox_username && process.env.SERVICEBOX_USERNAME) {
+    console.log('[Server] ⚠️  WAARSCHUWING: Geen credentials in request, tijdelijke fallback naar env vars');
+  }
+  const credentials = { username: sbUser, password: sbPass };
 
   if (!lookup_id || !vin) {
     return res.status(400).json({ error: 'lookup_id en vin zijn verplicht' });
@@ -228,6 +252,10 @@ app.post('/activate-warranty', async (req, res) => {
 
   if (!customer_email) {
     return res.status(400).json({ error: 'customer_email is verplicht' });
+  }
+
+  if (!sbUser || !sbPass) {
+    return res.status(400).json({ error: 'servicebox_username en servicebox_password zijn verplicht' });
   }
 
   console.log(`\n========================================`);

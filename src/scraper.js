@@ -13,8 +13,6 @@ const pdfParse = require('pdf-parse');
  */
 
 const SERVICEBOX_URL = process.env.SERVICEBOX_URL || 'https://servicebox.mpsa.com';
-const DEFAULT_USERNAME = process.env.SERVICEBOX_USERNAME;
-const DEFAULT_PASSWORD = process.env.SERVICEBOX_PASSWORD;
 
 /**
  * Vertaal Playwright / technische fouten naar korte NL-meldingen.
@@ -59,12 +57,16 @@ function sanitizeErrorMessage(rawMessage) {
 async function scrapeServicebox(kenteken, kmStand, credentials = {}) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '0');
-  const USERNAME = credentials.username || DEFAULT_USERNAME;
-  const PASSWORD = credentials.password || DEFAULT_PASSWORD;
+  const USERNAME = credentials.username || process.env.SERVICEBOX_USERNAME;
+  const PASSWORD = credentials.password || process.env.SERVICEBOX_PASSWORD;
+
+  if (!USERNAME || !PASSWORD) {
+    throw new Error('Servicebox credentials zijn verplicht. Stel deze in via Instellingen.');
+  }
 
   console.log(`[Scraper] Start scrape voor kenteken: ${kenteken}, km: ${kmStand || 'n.v.t.'}`);
   console.log(`[Scraper] Headless: ${headless}, SlowMo: ${slowMo}`);
-  console.log(`[Scraper] Credentials: ${credentials.username ? 'custom' : 'default'}`);
+  console.log(`[Scraper] Credentials: ${USERNAME}`);
 
   const browser = await chromium.launch({ headless, slowMo });
   const context = await browser.newContext({
@@ -2086,11 +2088,15 @@ async function scrapeQuotelink(vin, kmStand) {
 async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '250');
-  const USERNAME = credentials.username || DEFAULT_USERNAME;
-  const PASSWORD = credentials.password || DEFAULT_PASSWORD;
+  const USERNAME = credentials.username || process.env.SERVICEBOX_USERNAME;
+  const PASSWORD = credentials.password || process.env.SERVICEBOX_PASSWORD;
+
+  if (!USERNAME || !PASSWORD) {
+    throw new Error('Servicebox credentials zijn verplicht. Stel deze in via Instellingen.');
+  }
 
   console.log(`[Warranty] Start 2+6 activatie: ${vin}, km: ${kmStand}, email: ${customerEmail ? '***' : 'GEEN'}`);
-  console.log(`[Warranty] Credentials: ${credentials.username ? 'custom' : 'default'}`);
+  console.log(`[Warranty] Credentials: ${USERNAME}`);
 
   if (!customerEmail) {
     return { status: 'skipped', vin, message: 'Geen e-mailadres opgegeven (verplicht veld)' };
@@ -3389,12 +3395,16 @@ async function scrapeFrequencyOnly(kenteken, credentials = {}) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '0');
   const debugLog = [];
-  const USERNAME = credentials.username || DEFAULT_USERNAME;
-  const PASSWORD = credentials.password || DEFAULT_PASSWORD;
+  const USERNAME = credentials.username || process.env.SERVICEBOX_USERNAME;
+  const PASSWORD = credentials.password || process.env.SERVICEBOX_PASSWORD;
+
+  if (!USERNAME || !PASSWORD) {
+    throw new Error('Servicebox credentials zijn verplicht. Stel deze in via Instellingen.');
+  }
 
   console.log(`[FrequencyOnly] Start frequentie-only scrape voor kenteken: ${kenteken}`);
   console.log(`[FrequencyOnly] Headless: ${headless}, SlowMo: ${slowMo}`);
-  console.log(`[FrequencyOnly] Credentials: ${credentials.username ? 'custom' : 'default'}`);
+  console.log(`[FrequencyOnly] Credentials: ${USERNAME}`);
 
   const browser = await chromium.launch({ headless, slowMo });
   const context = await browser.newContext({
