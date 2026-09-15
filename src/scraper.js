@@ -3142,7 +3142,8 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     // ══════════════════════════════════════════════════════════════
     // STAP 9: Submit met retry (CEM backend kan timeout geven)
     // ══════════════════════════════════════════════════════════════
-    const MAX_SUBMIT_ATTEMPTS = 3;
+    const MAX_SUBMIT_ATTEMPTS = 5;
+    const RETRY_DELAYS = [15000, 30000, 45000, 60000]; // Exponential backoff: 15s, 30s, 45s, 60s
     let submitResult = null;
 
     for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {
@@ -3204,11 +3205,12 @@ async function activateWarranty(vin, kmStand, customerEmail) {
         await warrantyPage.waitForTimeout(2000);
 
         if (attempt < MAX_SUBMIT_ATTEMPTS) {
-          console.log(`[Warranty] Wacht 5s voor retry ${attempt + 1}...`);
-          await warrantyPage.waitForTimeout(5000);
+          const delay = RETRY_DELAYS[attempt - 1] || 60000;
+          console.log(`[Warranty] Wacht ${delay / 1000}s voor retry ${attempt + 1}...`);
+          await warrantyPage.waitForTimeout(delay);
           continue; // Retry
         } else {
-          submitResult = { status: 'error', message: 'CEM backend reageert niet na 3 pogingen' };
+          submitResult = { status: 'error', message: `CEM backend reageert niet na ${MAX_SUBMIT_ATTEMPTS} pogingen` };
           break;
         }
       }
@@ -3229,10 +3231,12 @@ async function activateWarranty(vin, kmStand, customerEmail) {
         if (okBtn) await okBtn.click();
         await warrantyPage.waitForTimeout(2000);
         if (attempt < MAX_SUBMIT_ATTEMPTS) {
-          await warrantyPage.waitForTimeout(5000);
+          const delay = RETRY_DELAYS[attempt - 1] || 60000;
+          console.log(`[Warranty] Wacht ${delay / 1000}s voor retry ${attempt + 1}...`);
+          await warrantyPage.waitForTimeout(delay);
           continue;
         }
-        submitResult = { status: 'error', message: 'CEM backend reageert niet na 3 pogingen' };
+        submitResult = { status: 'error', message: `CEM backend reageert niet na ${MAX_SUBMIT_ATTEMPTS} pogingen` };
         break;
       }
 

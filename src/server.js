@@ -22,6 +22,8 @@ function enqueue(job) {
   });
 }
 
+const QUEUE_COOLDOWN_MS = 15000; // 15s pauze tussen jobs om CEM backend niet te overbelasten
+
 async function processQueue() {
   if (isProcessing || queue.length === 0) return;
 
@@ -36,10 +38,13 @@ async function processQueue() {
     reject(error);
   } finally {
     isProcessing = false;
-    // Verwerk volgende job
+    // Verwerk volgende job met cooldown
     if (queue.length > 0) {
-      console.log(`[Queue] Volgende job starten...`);
-      processQueue();
+      console.log(`[Queue] Wacht ${QUEUE_COOLDOWN_MS / 1000}s cooldown voor volgende job...`);
+      setTimeout(() => {
+        console.log(`[Queue] Cooldown voorbij, volgende job starten...`);
+        processQueue();
+      }, QUEUE_COOLDOWN_MS);
     }
   }
 }
