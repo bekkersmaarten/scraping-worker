@@ -3143,7 +3143,7 @@ async function activateWarranty(vin, kmStand, customerEmail) {
     // STAP 9: Submit met retry (CEM backend kan timeout geven)
     // ══════════════════════════════════════════════════════════════
     const MAX_SUBMIT_ATTEMPTS = 5;
-    const RETRY_DELAYS = [15000, 30000, 45000, 60000]; // Exponential backoff: 15s, 30s, 45s, 60s
+    const RETRY_DELAYS = [30000, 60000, 120000, 180000]; // Exponential backoff: 30s, 60s, 2min, 3min
     let submitResult = null;
 
     for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {

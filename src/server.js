@@ -22,7 +22,7 @@ function enqueue(job) {
   });
 }
 
-const QUEUE_COOLDOWN_MS = 15000; // 15s pauze tussen jobs om CEM backend niet te overbelasten
+const QUEUE_COOLDOWN_MS = 30000; // 30s pauze tussen jobs om CEM backend niet te overbelasten
 
 async function processQueue() {
   if (isProcessing || queue.length === 0) return;
