@@ -150,7 +150,7 @@ app.post('/scrape', async (req, res) => {
       }
       return kenteken
         ? await scrapeServicebox(kenteken, km_stand, credentials)
-        : await scrapeQuotelink(vin, km_stand);
+        : await scrapeQuotelink(vin, km_stand, credentials);
     });
 
     console.log('[Server] Scrape voltooid, resultaat terugsturen naar callback...');

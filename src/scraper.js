@@ -89,7 +89,7 @@ async function scrapeServicebox(kenteken, kmStand, credentials = {}) {
 
   try {
     // STAP 1: Login
-    await login(page);
+    await login(page, USERNAME, PASSWORD);
 
     // STAP 2: Zoek voertuig op kenteken
     const vehicleData = await searchAndExtractVehicle(page, kenteken);
@@ -128,7 +128,7 @@ async function scrapeServicebox(kenteken, kmStand, credentials = {}) {
 // =========================================
 // LOGIN (HTTP credentials + SSO fallback)
 // =========================================
-async function login(page) {
+async function login(page, USERNAME, PASSWORD) {
   console.log('[Login] Navigeren naar Servicebox...');
   // Probeer eerst met networkidle, fallback naar domcontentloaded
   try {
@@ -2012,12 +2012,19 @@ async function extractPricesByCategory(page) {
  * 4. Open Menu pricing / Quotelink
  * 5. Extract intervallen + prijzen
  */
-async function scrapeQuotelink(vin, kmStand) {
+async function scrapeQuotelink(vin, kmStand, credentials = {}) {
   const headless = process.env.HEADLESS !== 'false';
   const slowMo = parseInt(process.env.SLOW_MO || '0');
+  const USERNAME = credentials.username;
+  const PASSWORD = credentials.password;
+
+  if (!USERNAME || !PASSWORD) {
+    throw new Error('Servicebox credentials zijn verplicht. Stel deze in via Instellingen.');
+  }
 
   console.log(`[Quotelink] Start VIN lookup: ${vin}, km: ${kmStand || 'n.v.t.'}`);
   console.log(`[Quotelink] Headless: ${headless}, SlowMo: ${slowMo}`);
+  console.log(`[Quotelink] Credentials: ${USERNAME}`);
 
   const browser = await chromium.launch({ headless, slowMo });
   const context = await browser.newContext({
@@ -2033,7 +2040,7 @@ async function scrapeQuotelink(vin, kmStand) {
 
   try {
     // STAP 1: Login
-    await login(page);
+    await login(page, USERNAME, PASSWORD);
 
     // STAP 2: Zoek voertuig op VIN (zelfde flow als kenteken)
     const vehicleData = await searchAndExtractVehicle(page, vin);
@@ -2123,7 +2130,7 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
 
   try {
     // STAP 1: Login
-    await login(page);
+    await login(page, USERNAME, PASSWORD);
 
     // STAP 2: Zoek voertuig op VIN
     const vehicleData = await searchAndExtractVehicle(page, vin);
@@ -3420,7 +3427,7 @@ async function scrapeFrequencyOnly(kenteken, credentials = {}) {
 
   try {
     // STAP 1: Login
-    await login(page);
+    await login(page, USERNAME, PASSWORD);
 
     // STAP 2: Zoek voertuig (nodig om VIN te krijgen + DOCUMENTATIE tab beschikbaar te maken)
     const vehicleData = await searchAndExtractVehicle(page, kenteken);
