@@ -14,22 +14,23 @@ const PORT = process.env.PORT || 3001;
 const queue = [];
 let isProcessing = false;
 
-function enqueue(job) {
+const COOLDOWN_SCRAPE_MS = 2000;    // 2s pauze tussen scrape jobs
+const COOLDOWN_WARRANTY_MS = 30000; // 30s pauze tussen warranty jobs (CEM backend beschermen)
+
+function enqueue(job, type = 'scrape') {
   return new Promise((resolve, reject) => {
-    queue.push({ job, resolve, reject });
-    console.log(`[Queue] Job toegevoegd, ${queue.length} in wachtrij`);
+    queue.push({ job, resolve, reject, type });
+    console.log(`[Queue] ${type} job toegevoegd, ${queue.length} in wachtrij`);
     processQueue();
   });
 }
-
-const QUEUE_COOLDOWN_MS = 30000; // 30s pauze tussen jobs om CEM backend niet te overbelasten
 
 async function processQueue() {
   if (isProcessing || queue.length === 0) return;
 
   isProcessing = true;
-  const { job, resolve, reject } = queue.shift();
-  console.log(`[Queue] Start job, nog ${queue.length} in wachtrij`);
+  const { job, resolve, reject, type } = queue.shift();
+  console.log(`[Queue] Start ${type} job, nog ${queue.length} in wachtrij`);
 
   try {
     const result = await job();
@@ -38,13 +39,14 @@ async function processQueue() {
     reject(error);
   } finally {
     isProcessing = false;
-    // Verwerk volgende job met cooldown
+    // Verwerk volgende job met cooldown per type
     if (queue.length > 0) {
-      console.log(`[Queue] Wacht ${QUEUE_COOLDOWN_MS / 1000}s cooldown voor volgende job...`);
+      const cooldown = type === 'warranty' ? COOLDOWN_WARRANTY_MS : COOLDOWN_SCRAPE_MS;
+      console.log(`[Queue] Wacht ${cooldown / 1000}s cooldown (${type}) voor volgende job...`);
       setTimeout(() => {
         console.log(`[Queue] Cooldown voorbij, volgende job starten...`);
         processQueue();
-      }, QUEUE_COOLDOWN_MS);
+      }, cooldown);
     }
   }
 }
@@ -260,7 +262,7 @@ app.post('/activate-warranty', async (req, res) => {
   try {
     const result = await enqueue(async () => {
       return await activateWarranty(vin, km_stand, customer_email, credentials);
-    });
+    }, 'warranty');
 
     console.log(`[Server] Warranty activatie voltooid: ${result.status}`);
 
