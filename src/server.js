@@ -8,7 +8,15 @@ app.use(express.json());
 const PORT = process.env.PORT || 3001;
 
 // =========================================
-// QUEUE: max 1 scrape tegelijk
+// WORKER_MODE: 'scrape', 'warranty', of 'all' (standaard)
+// - scrape:    alleen /scrape + /debug-frequency (meerdere replicas OK, 2s cooldown)
+// - warranty:  alleen /activate-warranty (1 replica, 30s cooldown)
+// - all:       alle endpoints (backward compatible)
+// =========================================
+const WORKER_MODE = (process.env.WORKER_MODE || 'all').toLowerCase();
+
+// =========================================
+// QUEUE: max 1 browser tegelijk per replica
 // Chromium is te zwaar om meerdere browsers tegelijk te draaien
 // =========================================
 const queue = [];
@@ -51,15 +59,21 @@ async function processQueue() {
   }
 }
 
-// Health check
+// Health check (altijd beschikbaar)
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
+    worker_mode: WORKER_MODE,
     timestamp: new Date().toISOString(),
     queue_length: queue.length,
     is_processing: isProcessing
   });
 });
+
+// =========================================
+// SCRAPE ENDPOINTS (mode: 'scrape' of 'all')
+// =========================================
+if (WORKER_MODE === 'scrape' || WORKER_MODE === 'all') {
 
 /**
  * GET /debug-frequency?kenteken=5SPR48
@@ -209,6 +223,13 @@ app.post('/scrape', async (req, res) => {
   }
 });
 
+} // einde scrape endpoints
+
+// =========================================
+// WARRANTY ENDPOINTS (mode: 'warranty' of 'all')
+// =========================================
+if (WORKER_MODE === 'warranty' || WORKER_MODE === 'all') {
+
 /**
  * POST /activate-warranty
  *
@@ -318,10 +339,21 @@ app.post('/activate-warranty', async (req, res) => {
   }
 });
 
+} // einde warranty endpoints
+
+// =========================================
+// START SERVER
+// =========================================
 app.listen(PORT, () => {
-  console.log(`\n🚗 Servicebox Scraping Worker draait op http://localhost:${PORT}`);
-  console.log(`   POST /scrape             — Start een lookup (kenteken of VIN)`);
-  console.log(`   POST /activate-warranty   — Activeer 2+6 garantie`);
+  console.log(`\n🚗 Servicebox Worker draait op http://localhost:${PORT}`);
+  console.log(`   WORKER_MODE: ${WORKER_MODE}`);
+  if (WORKER_MODE === 'scrape' || WORKER_MODE === 'all') {
+    console.log(`   POST /scrape             — Start een lookup (kenteken of VIN)`);
+    console.log(`   GET  /debug-frequency    — Debug frequency extraction`);
+  }
+  if (WORKER_MODE === 'warranty' || WORKER_MODE === 'all') {
+    console.log(`   POST /activate-warranty   — Activeer 2+6 garantie`);
+  }
   console.log(`   GET  /health             — Health check`);
-  console.log(`   Max 1 gelijktijdige scrape (queue-systeem)\n`);
+  console.log(`   Max 1 gelijktijdige browser per replica (queue-systeem)\n`);
 });
