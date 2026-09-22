@@ -3034,136 +3034,202 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     }
 
     // ══════════════════════════════════════════════════════════════
-    // STAP 7a: Datumvelden invullen (startDate, endDate)
-    // Allucare formulier heeft verplichte datumvelden die niet in de km/email
-    // scanner zitten. Zoek ze via formcontrolname en vul ze in.
+    // STAP 7a: Verborgen datumvelden invullen (startDate, endDate)
+    // Het Allucare formulier heeft verplichte Angular FormControls voor
+    // startDate en endDate die NIET als zichtbare inputs bestaan.
+    // Ze moeten via Angular's interne API gezet worden.
+    // De "Garantie startdatum" staat in de pagina-header.
     // ══════════════════════════════════════════════════════════════
-    console.log('[Warranty] STAP 7a: Datumvelden zoeken en invullen...');
+    console.log('[Warranty] STAP 7a: Verborgen datumvelden (startDate/endDate) invullen...');
 
-    const today = new Date();
-    const todayStr = `${today.getDate().toString().padStart(2, '0')}/${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getFullYear()}`; // DD/MM/YYYY
-    const todayISO = today.toISOString().substring(0, 10); // YYYY-MM-DD
-    const endDate = new Date();
-    endDate.setFullYear(endDate.getFullYear() + 2);
-    const endDateStr = `${endDate.getDate().toString().padStart(2, '0')}/${(endDate.getMonth() + 1).toString().padStart(2, '0')}/${endDate.getFullYear()}`;
-    const endDateISO = endDate.toISOString().substring(0, 10);
-
-    // Zoek alle datumgerelateerde inputs
-    const dateFieldsInfo = await formPage.evaluate(() => {
-      const dateInputs = [];
-      document.querySelectorAll('input').forEach(el => {
-        const fcn = el.getAttribute('formcontrolname') || '';
-        const name = el.name || '';
-        const type = el.type || '';
-        const matDatepicker = el.hasAttribute('matdatepicker') || el.hasAttribute('matInput') || el.closest('mat-form-field')?.querySelector('mat-datepicker-toggle') !== null;
-        const isDate = fcn.toLowerCase().includes('date') || name.toLowerCase().includes('date') ||
-          type === 'date' || matDatepicker ||
-          fcn.toLowerCase().includes('datum') || name.toLowerCase().includes('datum');
-
-        if (isDate) {
-          dateInputs.push({
-            formControlName: fcn,
-            name, type, id: el.id,
-            value: el.value || '',
-            disabled: el.disabled,
-            readOnly: el.readOnly,
-            visible: el.offsetParent !== null,
-            hasDatepickerToggle: !!el.closest('mat-form-field')?.querySelector('mat-datepicker-toggle'),
-            matLabel: el.closest('mat-form-field')?.querySelector('mat-label')?.textContent?.trim() || '',
-            outerHTML: el.outerHTML?.substring(0, 300)
-          });
-        }
-      });
-      return dateInputs;
+    // Extraheer de garantie startdatum uit de pagina header
+    const headerDateStr = await formPage.evaluate(() => {
+      const body = document.body?.innerText || '';
+      // Zoek "Garantie startdatum: DD/MM/YYYY"
+      const match = body.match(/[Gg]arantie\s+startdatum[:\s]+(\d{2}\/\d{2}\/\d{4})/);
+      return match ? match[1] : null;
     });
-    console.log(`[Warranty] Datumvelden gevonden: ${JSON.stringify(dateFieldsInfo)}`);
+    console.log(`[Warranty] Garantie startdatum uit header: ${headerDateStr || 'niet gevonden'}`);
 
-    for (const df of dateFieldsInfo) {
-      if (df.disabled || df.readOnly) {
-        console.log(`[Warranty] Skip datumveld ${df.formControlName || df.name}: disabled/readonly`);
-        continue;
+    const dateFixResult = await formPage.evaluate((headerDate) => {
+      const results = [];
+
+      // Parse de header datum (DD/MM/YYYY)
+      let startDateObj = new Date();
+      if (headerDate) {
+        const [d, m, y] = headerDate.split('/');
+        startDateObj = new Date(parseInt(y), parseInt(m) - 1, parseInt(d));
+        results.push(`parsed header date: ${startDateObj.toISOString()}`);
       }
-      if (df.value && df.value.trim() !== '') {
-        console.log(`[Warranty] Datumveld ${df.formControlName || df.name} al gevuld: "${df.value}"`);
-        continue;
-      }
+      const endDateObj = new Date(startDateObj);
+      endDateObj.setFullYear(endDateObj.getFullYear() + 2);
 
-      const fcn = (df.formControlName || df.name || '').toLowerCase();
-      const isStart = fcn.includes('start') || fcn.includes('begin');
-      const isEnd = fcn.includes('end') || fcn.includes('eind') || fcn.includes('fin');
-      const dateValue = isEnd ? endDateStr : todayStr;
-      const dateValueISO = isEnd ? endDateISO : todayISO;
-      const label = isEnd ? 'endDate' : 'startDate';
+      // ── Hulpfunctie: zoek Angular FormGroup via diverse methodes ──
+      function findFormGroup() {
+        const formEl = document.querySelector('form');
+        const appForm = document.querySelector('app-allucare-form');
 
-      console.log(`[Warranty] Vul datumveld ${df.formControlName || df.name} (${label}): ${dateValue}`);
-
-      // Methode 1: Playwright .fill() — probeer verschillende formaten
-      const selector = df.formControlName
-        ? `input[formcontrolname="${df.formControlName}"]`
-        : df.id ? `#${df.id}` : `input[name="${df.name}"]`;
-
-      try {
-        const dateInput = await formPage.$(selector);
-        if (dateInput) {
-          // Probeer ISO formaat eerst (YYYY-MM-DD), dan DD/MM/YYYY
-          try {
-            await dateInput.fill(dateValueISO);
-            console.log(`[Warranty] Datumveld ${label} ingevuld via fill (ISO): ${dateValueISO}`);
-          } catch (e) {
-            try {
-              await dateInput.fill(dateValue);
-              console.log(`[Warranty] Datumveld ${label} ingevuld via fill (DD/MM/YYYY): ${dateValue}`);
-            } catch (e2) {
-              console.log(`[Warranty] Fill mislukt voor ${label}: ${e2.message.substring(0, 80)}`);
-            }
-          }
-        }
-      } catch (e) {
-        console.log(`[Warranty] Selector ${selector} niet gevonden: ${e.message.substring(0, 80)}`);
-      }
-
-      // Methode 2: JavaScript evaluate — set value + dispatch events
-      await formPage.evaluate((args) => {
-        const { selector, dateValueISO, dateValue } = args;
-        const el = document.querySelector(selector);
-        if (!el) return;
-        // Angular Material datepicker verwacht vaak een Date object via nativeElement
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        nativeInputValueSetter.call(el, dateValueISO || dateValue);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('blur', { bubbles: true }));
-        // Trigger dateChange event voor mat-datepicker
-        el.dispatchEvent(new Event('dateChange', { bubbles: true }));
-      }, { selector, dateValueISO, dateValue });
-      await formPage.waitForTimeout(300);
-
-      // Methode 3: Probeer via de datepicker toggle te klikken en een datum te selecteren
-      if (df.hasDatepickerToggle) {
-        console.log(`[Warranty] Datumveld ${label} heeft datepicker toggle, probeer te openen...`);
+        // Methode 1: ng.getComponent (beschikbaar als Angular in dev mode draait)
         try {
-          const toggle = await formPage.$(`${selector.replace('input', 'mat-form-field')} mat-datepicker-toggle button, mat-datepicker-toggle button`);
-          if (toggle) {
-            await toggle.click();
-            await formPage.waitForTimeout(1000);
-            // Klik op "vandaag" of de eerste beschikbare datum
-            const todayCell = await formPage.$('.mat-calendar-body-today, .mat-calendar-body-cell:not(.mat-calendar-body-disabled)');
-            if (todayCell) {
-              await todayCell.click();
-              console.log(`[Warranty] Datum geselecteerd via datepicker voor ${label}`);
-              await formPage.waitForTimeout(500);
+          if (typeof ng !== 'undefined' && ng.getOwningComponent) {
+            const comp = ng.getOwningComponent(formEl) || ng.getComponent(formEl) ||
+              (appForm ? (ng.getComponent(appForm) || ng.getOwningComponent(appForm)) : null);
+            if (comp) {
+              for (const key of Object.keys(comp)) {
+                const val = comp[key];
+                if (val && val.controls && typeof val.updateValueAndValidity === 'function') {
+                  results.push(`FormGroup gevonden via ng API (key: ${key})`);
+                  return val;
+                }
+              }
             }
           }
-        } catch (e) {
-          console.log(`[Warranty] Datepicker toggle klik mislukt: ${e.message.substring(0, 80)}`);
-        }
-      }
-    }
+        } catch (e) { results.push(`ng API: ${e.message}`); }
 
-    // Als er geen datumvelden gevonden zijn via DOM, probeer alsnog via Angular API
-    if (dateFieldsInfo.length === 0) {
-      console.log('[Warranty] Geen datumvelden in DOM gevonden, probeer via Angular ng API...');
-    }
+        // Methode 2: Via __ngContext__ op het component element
+        try {
+          const targets = [appForm, formEl, document.querySelector('[_nghost-yeb-c5]'), document.querySelector('[_ngcontent-yeb-c5]')?.closest('[_nghost-yeb-c5]')];
+          for (const target of targets) {
+            if (!target) continue;
+            const ctx = target.__ngContext__;
+            if (!ctx) continue;
+
+            // __ngContext__ is een LView array in Angular 9+
+            // De component instance zit typisch op index 8 (CONTEXT offset)
+            if (Array.isArray(ctx)) {
+              for (let i = 0; i < ctx.length; i++) {
+                const item = ctx[i];
+                if (item && typeof item === 'object' && !Array.isArray(item) && item.controls && typeof item.updateValueAndValidity === 'function') {
+                  results.push(`FormGroup direct in LView[${i}]`);
+                  return item;
+                }
+                if (item && typeof item === 'object' && !Array.isArray(item)) {
+                  for (const key of Object.keys(item)) {
+                    try {
+                      const val = item[key];
+                      if (val && val.controls && typeof val.updateValueAndValidity === 'function') {
+                        results.push(`FormGroup via LView[${i}].${key}`);
+                        return val;
+                      }
+                    } catch (e) {}
+                  }
+                }
+              }
+            }
+            // Nummer verwijst naar het LView in de parent
+            if (typeof ctx === 'number') {
+              results.push(`__ngContext__ is number (${ctx}), skip`);
+            }
+          }
+        } catch (e) { results.push(`__ngContext__: ${e.message}`); }
+
+        // Methode 3: Via getAllAngularRootElements
+        try {
+          if (typeof getAllAngularRootElements === 'function') {
+            const roots = getAllAngularRootElements();
+            for (const root of roots) {
+              const injector = root.__ngContext__ || root.injector;
+              results.push(`Root element gevonden: ${root.tagName}`);
+            }
+          }
+        } catch (e) { results.push(`getAllAngularRootElements: ${e.message}`); }
+
+        // Methode 4: Zoek via monkey-patched AbstractControl
+        try {
+          const allNgInvalid = document.querySelectorAll('.ng-invalid');
+          for (const el of allNgInvalid) {
+            // Angular bindt FormControl aan het element via __ngContext__ of properties
+            const keys = Object.keys(el);
+            for (const key of keys) {
+              if (key.startsWith('__ng') || key.startsWith('ng-')) {
+                const val = el[key];
+                if (val && val._rawValidators) {
+                  results.push(`FormControl gevonden op .ng-invalid element via ${key}`);
+                }
+              }
+            }
+          }
+        } catch (e) {}
+
+        return null;
+      }
+
+      const formGroup = findFormGroup();
+
+      if (formGroup) {
+        const controlNames = Object.keys(formGroup.controls);
+        results.push(`Controls: ${controlNames.join(', ')}`);
+
+        // Status van alle controls loggen
+        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
+          results.push(`  ${name}: valid=${ctrl.valid}, value=${JSON.stringify(ctrl.value)?.substring(0, 50)}, errors=${JSON.stringify(ctrl.errors)}`);
+        }
+
+        // Zet startDate
+        if (formGroup.controls.startDate) {
+          const ctrl = formGroup.controls.startDate;
+          ctrl.setValue(startDateObj);
+          ctrl.markAsDirty();
+          ctrl.updateValueAndValidity();
+          results.push(`startDate gezet: ${startDateObj.toISOString().substring(0, 10)}`);
+
+          // Als Date object niet werkt, probeer string
+          if (!ctrl.valid) {
+            const dateStr = `${startDateObj.getFullYear()}-${String(startDateObj.getMonth()+1).padStart(2,'0')}-${String(startDateObj.getDate()).padStart(2,'0')}`;
+            ctrl.setValue(dateStr);
+            ctrl.updateValueAndValidity();
+            results.push(`startDate retry als string: ${dateStr}, valid=${ctrl.valid}`);
+          }
+          if (!ctrl.valid) {
+            // Probeer DD/MM/YYYY formaat
+            ctrl.setValue(headerDate || `${String(startDateObj.getDate()).padStart(2,'0')}/${String(startDateObj.getMonth()+1).padStart(2,'0')}/${startDateObj.getFullYear()}`);
+            ctrl.updateValueAndValidity();
+            results.push(`startDate retry als DD/MM/YYYY, valid=${ctrl.valid}`);
+          }
+        }
+
+        // Zet endDate
+        if (formGroup.controls.endDate) {
+          const ctrl = formGroup.controls.endDate;
+          ctrl.setValue(endDateObj);
+          ctrl.markAsDirty();
+          ctrl.updateValueAndValidity();
+          results.push(`endDate gezet: ${endDateObj.toISOString().substring(0, 10)}`);
+
+          if (!ctrl.valid) {
+            const dateStr = `${endDateObj.getFullYear()}-${String(endDateObj.getMonth()+1).padStart(2,'0')}-${String(endDateObj.getDate()).padStart(2,'0')}`;
+            ctrl.setValue(dateStr);
+            ctrl.updateValueAndValidity();
+            results.push(`endDate retry als string: ${dateStr}, valid=${ctrl.valid}`);
+          }
+        }
+
+        // Zet ALLE nog ongeldige boolean controls op true
+        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
+          if (!ctrl.valid && (ctrl.value === false || ctrl.value === null)) {
+            ctrl.setValue(true);
+            ctrl.markAsDirty();
+            ctrl.updateValueAndValidity();
+            results.push(`${name} gezet op true`);
+          }
+        }
+
+        formGroup.updateValueAndValidity();
+        results.push(`Form valid na fix: ${formGroup.valid}`);
+
+        // Log finale status
+        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
+          if (!ctrl.valid) {
+            results.push(`NOG ONGELDIG: ${name}: value=${JSON.stringify(ctrl.value)?.substring(0, 30)}, errors=${JSON.stringify(ctrl.errors)}`);
+          }
+        }
+      } else {
+        results.push('FormGroup NIET gevonden via alle methodes');
+      }
+
+      return results.join('\n');
+    }, headerDateStr);
+    console.log(`[Warranty] STAP 7a datumfix resultaat:\n${dateFixResult}`);
 
     // ══════════════════════════════════════════════════════════════
     // STAP 7b: Sync DOM-waarden naar Angular FormControls
