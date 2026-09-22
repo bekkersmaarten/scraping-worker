@@ -3394,23 +3394,54 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt++) {
       console.log(`[Warranty] Submit poging ${attempt}/${MAX_SUBMIT_ATTEMPTS}...`);
 
-      // Zoek submit knop
-      let submitBtn = await formPage.$('button:has-text("Indienen"), input[value*="Indienen"], button:has-text("Submit"), input[type="submit"]');
-      if (!submitBtn && formPage !== warrantyPage) {
-        submitBtn = await warrantyPage.$('button:has-text("Indienen"), input[value*="Indienen"], button:has-text("Submit"), input[type="submit"]');
+      // Zoek submit knop — gebruik locator() ipv $() voor :has-text() support
+      let submitBtn = null;
+
+      // Methode 1: Playwright locator met tekst matching
+      for (const searchPage of [formPage, warrantyPage]) {
+        if (submitBtn) break;
+        try {
+          const loc = searchPage.locator('button[type="submit"], button:has-text("Indienen"), button:has-text("Submit")').first();
+          if (await loc.count() > 0) {
+            submitBtn = loc;
+            console.log('[Warranty] Submit knop gevonden via locator');
+            break;
+          }
+        } catch (e) { /* probeer volgende */ }
       }
+
+      // Methode 2: CSS selector voor button[type="submit"] of mat-flat-button
       if (!submitBtn) {
-        const allBtns = await formPage.$$('button');
-        for (const btn of allBtns) {
-          const txt = await btn.evaluate(el => el.textContent?.trim()?.toLowerCase());
-          if (txt && (txt.includes('indienen') || txt.includes('submit') || txt.includes('bevestig'))) {
+        for (const searchPage of [formPage, warrantyPage]) {
+          const btn = await searchPage.$('button[type="submit"], button.mat-flat-button[color="primary"], input[type="submit"]');
+          if (btn) {
             submitBtn = btn;
+            console.log('[Warranty] Submit knop gevonden via CSS selector');
             break;
           }
         }
       }
+
+      // Methode 3: Brute force — zoek alle buttons en check tekst
       if (!submitBtn) {
-        console.log('[Warranty] Indienen-knop niet gevonden');
+        for (const searchPage of [formPage, warrantyPage]) {
+          if (submitBtn) break;
+          const allBtns = await searchPage.$$('button, [role="button"]');
+          console.log(`[Warranty] ${allBtns.length} buttons gevonden, zoek "Indienen"...`);
+          for (const btn of allBtns) {
+            const txt = await btn.evaluate(el => el.textContent?.trim()?.toLowerCase()).catch(() => '');
+            console.log(`[Warranty]   Button: "${txt}"`);
+            if (txt && (txt.includes('indienen') || txt.includes('submit') || txt.includes('soumettre') || txt.includes('bevestig'))) {
+              submitBtn = btn;
+              console.log(`[Warranty] Submit knop gevonden via tekst: "${txt}"`);
+              break;
+            }
+          }
+        }
+      }
+
+      if (!submitBtn) {
+        console.log('[Warranty] Indienen-knop niet gevonden na alle methodes');
         submitResult = { status: 'error', message: 'Indienen-knop niet gevonden' };
         break;
       }
