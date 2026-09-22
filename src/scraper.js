@@ -3034,6 +3034,138 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     }
 
     // ══════════════════════════════════════════════════════════════
+    // STAP 7a: Datumvelden invullen (startDate, endDate)
+    // Allucare formulier heeft verplichte datumvelden die niet in de km/email
+    // scanner zitten. Zoek ze via formcontrolname en vul ze in.
+    // ══════════════════════════════════════════════════════════════
+    console.log('[Warranty] STAP 7a: Datumvelden zoeken en invullen...');
+
+    const today = new Date();
+    const todayStr = `${today.getDate().toString().padStart(2, '0')}/${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getFullYear()}`; // DD/MM/YYYY
+    const todayISO = today.toISOString().substring(0, 10); // YYYY-MM-DD
+    const endDate = new Date();
+    endDate.setFullYear(endDate.getFullYear() + 2);
+    const endDateStr = `${endDate.getDate().toString().padStart(2, '0')}/${(endDate.getMonth() + 1).toString().padStart(2, '0')}/${endDate.getFullYear()}`;
+    const endDateISO = endDate.toISOString().substring(0, 10);
+
+    // Zoek alle datumgerelateerde inputs
+    const dateFieldsInfo = await formPage.evaluate(() => {
+      const dateInputs = [];
+      document.querySelectorAll('input').forEach(el => {
+        const fcn = el.getAttribute('formcontrolname') || '';
+        const name = el.name || '';
+        const type = el.type || '';
+        const matDatepicker = el.hasAttribute('matdatepicker') || el.hasAttribute('matInput') || el.closest('mat-form-field')?.querySelector('mat-datepicker-toggle') !== null;
+        const isDate = fcn.toLowerCase().includes('date') || name.toLowerCase().includes('date') ||
+          type === 'date' || matDatepicker ||
+          fcn.toLowerCase().includes('datum') || name.toLowerCase().includes('datum');
+
+        if (isDate) {
+          dateInputs.push({
+            formControlName: fcn,
+            name, type, id: el.id,
+            value: el.value || '',
+            disabled: el.disabled,
+            readOnly: el.readOnly,
+            visible: el.offsetParent !== null,
+            hasDatepickerToggle: !!el.closest('mat-form-field')?.querySelector('mat-datepicker-toggle'),
+            matLabel: el.closest('mat-form-field')?.querySelector('mat-label')?.textContent?.trim() || '',
+            outerHTML: el.outerHTML?.substring(0, 300)
+          });
+        }
+      });
+      return dateInputs;
+    });
+    console.log(`[Warranty] Datumvelden gevonden: ${JSON.stringify(dateFieldsInfo)}`);
+
+    for (const df of dateFieldsInfo) {
+      if (df.disabled || df.readOnly) {
+        console.log(`[Warranty] Skip datumveld ${df.formControlName || df.name}: disabled/readonly`);
+        continue;
+      }
+      if (df.value && df.value.trim() !== '') {
+        console.log(`[Warranty] Datumveld ${df.formControlName || df.name} al gevuld: "${df.value}"`);
+        continue;
+      }
+
+      const fcn = (df.formControlName || df.name || '').toLowerCase();
+      const isStart = fcn.includes('start') || fcn.includes('begin');
+      const isEnd = fcn.includes('end') || fcn.includes('eind') || fcn.includes('fin');
+      const dateValue = isEnd ? endDateStr : todayStr;
+      const dateValueISO = isEnd ? endDateISO : todayISO;
+      const label = isEnd ? 'endDate' : 'startDate';
+
+      console.log(`[Warranty] Vul datumveld ${df.formControlName || df.name} (${label}): ${dateValue}`);
+
+      // Methode 1: Playwright .fill() — probeer verschillende formaten
+      const selector = df.formControlName
+        ? `input[formcontrolname="${df.formControlName}"]`
+        : df.id ? `#${df.id}` : `input[name="${df.name}"]`;
+
+      try {
+        const dateInput = await formPage.$(selector);
+        if (dateInput) {
+          // Probeer ISO formaat eerst (YYYY-MM-DD), dan DD/MM/YYYY
+          try {
+            await dateInput.fill(dateValueISO);
+            console.log(`[Warranty] Datumveld ${label} ingevuld via fill (ISO): ${dateValueISO}`);
+          } catch (e) {
+            try {
+              await dateInput.fill(dateValue);
+              console.log(`[Warranty] Datumveld ${label} ingevuld via fill (DD/MM/YYYY): ${dateValue}`);
+            } catch (e2) {
+              console.log(`[Warranty] Fill mislukt voor ${label}: ${e2.message.substring(0, 80)}`);
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`[Warranty] Selector ${selector} niet gevonden: ${e.message.substring(0, 80)}`);
+      }
+
+      // Methode 2: JavaScript evaluate — set value + dispatch events
+      await formPage.evaluate((args) => {
+        const { selector, dateValueISO, dateValue } = args;
+        const el = document.querySelector(selector);
+        if (!el) return;
+        // Angular Material datepicker verwacht vaak een Date object via nativeElement
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeInputValueSetter.call(el, dateValueISO || dateValue);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+        // Trigger dateChange event voor mat-datepicker
+        el.dispatchEvent(new Event('dateChange', { bubbles: true }));
+      }, { selector, dateValueISO, dateValue });
+      await formPage.waitForTimeout(300);
+
+      // Methode 3: Probeer via de datepicker toggle te klikken en een datum te selecteren
+      if (df.hasDatepickerToggle) {
+        console.log(`[Warranty] Datumveld ${label} heeft datepicker toggle, probeer te openen...`);
+        try {
+          const toggle = await formPage.$(`${selector.replace('input', 'mat-form-field')} mat-datepicker-toggle button, mat-datepicker-toggle button`);
+          if (toggle) {
+            await toggle.click();
+            await formPage.waitForTimeout(1000);
+            // Klik op "vandaag" of de eerste beschikbare datum
+            const todayCell = await formPage.$('.mat-calendar-body-today, .mat-calendar-body-cell:not(.mat-calendar-body-disabled)');
+            if (todayCell) {
+              await todayCell.click();
+              console.log(`[Warranty] Datum geselecteerd via datepicker voor ${label}`);
+              await formPage.waitForTimeout(500);
+            }
+          }
+        } catch (e) {
+          console.log(`[Warranty] Datepicker toggle klik mislukt: ${e.message.substring(0, 80)}`);
+        }
+      }
+    }
+
+    // Als er geen datumvelden gevonden zijn via DOM, probeer alsnog via Angular API
+    if (dateFieldsInfo.length === 0) {
+      console.log('[Warranty] Geen datumvelden in DOM gevonden, probeer via Angular ng API...');
+    }
+
+    // ══════════════════════════════════════════════════════════════
     // STAP 7b: Sync DOM-waarden naar Angular FormControls
     // Playwright .fill() zet de DOM value, maar Angular's reactive form
     // pakt het niet altijd op. Sync nu via ng API.
