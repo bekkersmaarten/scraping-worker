@@ -2818,175 +2818,198 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     let emailFilled = false;
 
     // ── Allucare formulier structuur (bekend uit live inspectie): ──
-    // Sectie "Contractgegevens":
-    //   - "Kilometerstand van het voertuig*" heading → mat-form-field met input type=number, mat-label "Kilometer"
-    //   - "e-mailadres van de klant*" heading → mat-form-field met input (type=text of email), heading staat BUITEN de mat-form-field
-    //   - Read-only velden: "Leeftijd van het voertuig", "Mijn login ID", "Voertuigmerk Werkplaats-ID"
-    //   - Twee checkboxes: "Ik bevestig dat het werk voltooid is..." en "Ik bevestig dat ik het Privacybeleid..."
-    //   - Knoppen: "Annuleer" en "Indienen"
-    // De heading "e-mailadres van de klant*" staat als apart element BOVEN de mat-form-field,
-    // waardoor el.closest('div') de inner mat-form-field wrapper vindt en niet de heading.
+    // Het formulier heeft precies 2 bewerkbare velden in DOM-volgorde:
+    //   1. Kilometerstand (type=number of text, met spinner)
+    //   2. E-mailadres klant (type=text of email)
+    // Plus read-only velden en checkboxes.
+    // Aanpak: vind alle bewerkbare inputs, identificeer km en email, vul in.
 
-    // STRATEGIE 0 (nieuw): Direct formulier-aware aanpak
-    // Vind ALLE niet-disabled, niet-readonly, zichtbare tekst/number inputs
-    // Op het Allucare formulier zijn er precies 2: km (type=number) en email (type=text)
-    console.log('[Warranty] Strategie 0: Directe veld-detectie...');
-    const editableInputs = await formPage.evaluate(() => {
-      const inputs = Array.from(document.querySelectorAll('input'));
-      return inputs
-        .filter(el => {
-          if (el.disabled || el.readOnly) return false;
-          if (['hidden', 'checkbox', 'radio', 'submit', 'button', 'image'].includes(el.type)) return false;
-          if (el.offsetParent === null) return false;
-          // Check of het veld echt bewerkbaar is (niet in een readonly container)
+    // Stap 1: Verzamel alle inputs met hun properties via Playwright handles
+    console.log('[Warranty] Velden zoeken op Allucare formulier...');
+    const allInputHandles = await formPage.$$('input');
+    console.log(`[Warranty] Totaal ${allInputHandles.length} input elementen gevonden`);
+
+    // Classificeer elk veld
+    const fieldClassifications = [];
+    for (let i = 0; i < allInputHandles.length; i++) {
+      try {
+        const info = await allInputHandles[i].evaluate(el => {
           const mff = el.closest('mat-form-field');
-          if (mff && mff.classList.contains('mat-form-field-disabled')) return false;
-          return true;
-        })
-        .map(el => ({
-          index: Array.from(document.querySelectorAll('input')).indexOf(el),
-          type: el.type, name: el.name, id: el.id,
-          value: el.value?.substring(0, 50) || '',
-          placeholder: el.placeholder || '',
-          // Zoek het label: check mat-label, gewone label, en alle tekst BOVEN dit element
-          matLabel: el.closest('mat-form-field')?.querySelector('mat-label')?.textContent?.trim() || '',
-          // Zoek het heading/label element dat als vorig sibling van de mat-form-field staat
-          headingAbove: (() => {
-            const mff = el.closest('mat-form-field');
-            if (!mff) return '';
-            // Zoek siblings/voorgangers van de mat-form-field
+          const matLabel = mff ? (mff.querySelector('mat-label')?.textContent?.trim() || '') : '';
+
+          // Zoek heading boven het veld: loop door siblings van mat-form-field OF parent
+          let headingAbove = '';
+          if (mff) {
             let prev = mff.previousElementSibling;
             while (prev) {
-              const text = prev.textContent?.trim();
-              if (text && text.length > 2) return text.substring(0, 100);
+              const t = prev.textContent?.trim();
+              if (t && t.length > 2) { headingAbove = t.substring(0, 150); break; }
               prev = prev.previousElementSibling;
             }
-            // Zoek in parent container
-            const parent = mff.parentElement;
-            if (parent) {
-              const children = Array.from(parent.children);
-              const mffIdx = children.indexOf(mff);
-              for (let i = mffIdx - 1; i >= 0; i--) {
-                const text = children[i].textContent?.trim();
-                if (text && text.length > 2) return text.substring(0, 100);
+            if (!headingAbove && mff.parentElement) {
+              const siblings = Array.from(mff.parentElement.children);
+              const idx = siblings.indexOf(mff);
+              for (let j = idx - 1; j >= 0; j--) {
+                const t = siblings[j].textContent?.trim();
+                if (t && t.length > 2) { headingAbove = t.substring(0, 150); break; }
               }
             }
-            return '';
-          })(),
-          outerHTML: el.outerHTML?.substring(0, 200) || ''
-        }));
-    });
-
-    console.log(`[Warranty] ${editableInputs.length} bewerkbare input velden gevonden:`);
-    editableInputs.forEach((f, i) => console.log(`[Warranty]   EDITABLE[${i}]: type=${f.type}, id=${f.id}, name=${f.name}, matLabel="${f.matLabel}", headingAbove="${f.headingAbove}", value="${f.value}", placeholder="${f.placeholder}"`));
-
-    // Vul de velden in op basis van de heading/label
-    for (const field of editableInputs) {
-      const allText = [field.matLabel, field.headingAbove, field.name, field.id, field.placeholder].join(' ').toLowerCase();
-
-      if (!kmFilled && (field.type === 'number' || allText.includes('kilometer') || allText.includes('km') || allText.includes('mileage'))) {
-        try {
-          // Gebruik de index om het element opnieuw te vinden
-          const el = await formPage.evaluateHandle((idx) => document.querySelectorAll('input')[idx], field.index);
-          await el.asElement().fill(String(kmStand));
-          kmFilled = true;
-          console.log(`[Warranty] Km ingevuld via directe detectie: ${kmStand} (heading: "${field.headingAbove}")`);
-        } catch (e) { console.log(`[Warranty] Km fill fout: ${e.message.substring(0, 100)}`); }
-      } else if (!emailFilled && (field.type === 'email' || allText.includes('mail') || allText.includes('e-mail') || allText.includes('courriel') || allText.includes('adres'))) {
-        try {
-          const el = await formPage.evaluateHandle((idx) => document.querySelectorAll('input')[idx], field.index);
-          await el.asElement().fill(customerEmail);
-          emailFilled = true;
-          console.log(`[Warranty] Email ingevuld via directe detectie (heading: "${field.headingAbove}")`);
-        } catch (e) { console.log(`[Warranty] Email fill fout: ${e.message.substring(0, 100)}`); }
-      }
-    }
-
-    // STRATEGIE 1: Als email nog niet gevuld — vul het 2e bewerkbare veld
-    // Op het Allucare formulier is veld 1 altijd km en veld 2 altijd email
-    if (kmFilled && !emailFilled && editableInputs.length >= 2) {
-      console.log('[Warranty] Strategie 1: Email = 2e bewerkbare veld...');
-      const emailField = editableInputs.find(f => f.type !== 'number' && !f.value);
-      if (emailField) {
-        try {
-          const el = await formPage.evaluateHandle((idx) => document.querySelectorAll('input')[idx], emailField.index);
-          await el.asElement().fill(customerEmail);
-          emailFilled = true;
-          console.log(`[Warranty] Email ingevuld als 2e bewerkbaar veld (id: ${emailField.id}, name: ${emailField.name})`);
-        } catch (e) { console.log(`[Warranty] Email 2e veld fout: ${e.message.substring(0, 100)}`); }
-      }
-    }
-
-    // STRATEGIE 2: Brute force — pak ALLE inputs en vul de eerste lege niet-number in
-    if (!emailFilled) {
-      console.log('[Warranty] Strategie 2: Brute force eerste lege niet-number input...');
-      const allInputHandles = await formPage.$$('input');
-      for (const handle of allInputHandles) {
-        try {
-          const info = await handle.evaluate(el => ({
-            type: el.type, disabled: el.disabled, readOnly: el.readOnly,
-            visible: el.offsetParent !== null,
-            value: el.value || '', id: el.id, name: el.name
-          }));
-          if (info.disabled || info.readOnly || !info.visible) continue;
-          if (['hidden', 'checkbox', 'radio', 'submit', 'button', 'image', 'number'].includes(info.type)) continue;
-          if (info.value && info.value.trim() !== '') continue; // skip gevulde velden
-          // Dit is een leeg, zichtbaar, enabled tekstveld — moet het email veld zijn
-          await handle.fill(customerEmail);
-          emailFilled = true;
-          console.log(`[Warranty] Email brute force: ingevuld in type=${info.type}, id=${info.id}, name=${info.name}`);
-          break;
-        } catch (e) {
-          console.log(`[Warranty] Brute force fill fout: ${e.message.substring(0, 100)}`);
-          continue;
-        }
-      }
-    }
-
-    // STRATEGIE 3: Misschien is het email veld pre-filled — zoek velden met @ en overschrijf
-    if (!emailFilled) {
-      console.log('[Warranty] Strategie 3: Pre-filled email veld zoeken...');
-      const allInputHandles = await formPage.$$('input');
-      for (const handle of allInputHandles) {
-        try {
-          const info = await handle.evaluate(el => ({
-            type: el.type, disabled: el.disabled, readOnly: el.readOnly,
-            visible: el.offsetParent !== null, value: el.value || ''
-          }));
-          if (info.disabled || info.readOnly || !info.visible) continue;
-          if (['hidden', 'checkbox', 'radio', 'submit', 'button', 'image'].includes(info.type)) continue;
-          if (info.value.includes('@')) {
-            console.log(`[Warranty] Pre-filled email gevonden: "${info.value}"`);
-            await handle.fill(customerEmail);
-            emailFilled = true;
-            console.log(`[Warranty] Pre-filled email overschreven`);
-            break;
           }
-        } catch (e) { continue; }
+
+          // Zoek ook tekst in grotere parent containers (3 niveaus omhoog)
+          let ancestorText = '';
+          let ancestor = el.parentElement;
+          for (let level = 0; level < 5 && ancestor; level++) {
+            const t = ancestor.textContent?.trim()?.substring(0, 300) || '';
+            if (t.length > ancestorText.length) ancestorText = t;
+            ancestor = ancestor.parentElement;
+          }
+
+          return {
+            type: el.type, name: el.name, id: el.id,
+            value: el.value?.substring(0, 50) || '',
+            placeholder: el.placeholder || '',
+            disabled: el.disabled, readOnly: el.readOnly,
+            visible: el.offsetParent !== null,
+            matLabel, headingAbove,
+            ancestorText: ancestorText.substring(0, 300),
+            mffDisabled: mff ? mff.classList.contains('mat-form-field-disabled') : false,
+            outerHTML: el.outerHTML?.substring(0, 250) || ''
+          };
+        });
+
+        const isEditable = !info.disabled && !info.readOnly && info.visible && !info.mffDisabled &&
+          !['hidden', 'checkbox', 'radio', 'submit', 'button', 'image'].includes(info.type);
+
+        console.log(`[Warranty]   INPUT[${i}]: type=${info.type}, editable=${isEditable}, id=${info.id}, name=${info.name}, matLabel="${info.matLabel}", heading="${info.headingAbove}", value="${info.value}"`);
+
+        if (isEditable) {
+          fieldClassifications.push({ handle: allInputHandles[i], info, index: i });
+        }
+      } catch (e) {
+        console.log(`[Warranty]   INPUT[${i}]: fout bij evaluatie: ${e.message.substring(0, 80)}`);
       }
     }
 
-    // STRATEGIE 4: Wacht 3s (Angular conditional rendering) en probeer opnieuw
-    if (kmFilled && !emailFilled) {
-      console.log('[Warranty] Strategie 4: Wacht op Angular re-render na km...');
+    console.log(`[Warranty] ${fieldClassifications.length} bewerkbare velden gevonden`);
+
+    // Stap 2: Identificeer km en email veld
+    let kmField = null;
+    let emailField = null;
+
+    for (const fc of fieldClassifications) {
+      const allText = [fc.info.matLabel, fc.info.headingAbove, fc.info.name, fc.info.id, fc.info.placeholder, fc.info.ancestorText].join(' ').toLowerCase();
+
+      const isKm = fc.info.type === 'number' ||
+        allText.includes('kilometer') || allText.includes('mileage') || allText.includes('odometer') || allText.includes('kilométrage') ||
+        (fc.info.matLabel.toLowerCase() === 'kilometer');
+
+      const isEmail = fc.info.type === 'email' ||
+        allText.includes('e-mail') || allText.includes('mailadres') || allText.includes('courriel') ||
+        (allText.includes('mail') && !allText.includes('kilometer'));
+
+      if (isKm && !kmField) {
+        kmField = fc;
+        console.log(`[Warranty] KM veld geïdentificeerd: INPUT[${fc.index}] type=${fc.info.type}, matLabel="${fc.info.matLabel}"`);
+      } else if (isEmail && !emailField) {
+        emailField = fc;
+        console.log(`[Warranty] EMAIL veld geïdentificeerd: INPUT[${fc.index}] type=${fc.info.type}, heading="${fc.info.headingAbove}"`);
+      }
+    }
+
+    // Stap 3: Fallback — als er precies 2 bewerkbare velden zijn, is #1 km en #2 email
+    if (!kmField && !emailField && fieldClassifications.length === 2) {
+      kmField = fieldClassifications[0];
+      emailField = fieldClassifications[1];
+      console.log('[Warranty] Fallback: 2 velden → #1=km, #2=email');
+    } else if (!kmField && fieldClassifications.length >= 1) {
+      // Eerste veld dat niet als email herkend is
+      kmField = fieldClassifications.find(fc => fc !== emailField) || fieldClassifications[0];
+      console.log(`[Warranty] Fallback: km = eerste niet-email veld (INPUT[${kmField?.index}])`);
+    }
+    if (!emailField && fieldClassifications.length >= 2) {
+      emailField = fieldClassifications.find(fc => fc !== kmField);
+      console.log(`[Warranty] Fallback: email = eerste niet-km veld (INPUT[${emailField?.index}])`);
+    }
+
+    // Stap 4: Invullen
+    if (kmField) {
+      try {
+        await kmField.handle.fill(String(kmStand));
+        kmFilled = true;
+        console.log(`[Warranty] Kilometerstand ingevuld: ${kmStand}`);
+      } catch (e) {
+        console.log(`[Warranty] Km fill FOUT: ${e.message.substring(0, 150)}`);
+        // Fallback: probeer via evaluate
+        try {
+          await kmField.handle.evaluate((el, val) => {
+            el.value = val;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }, String(kmStand));
+          kmFilled = true;
+          console.log('[Warranty] Km ingevuld via JS evaluate fallback');
+        } catch (e2) { console.log(`[Warranty] Km JS evaluate ook mislukt: ${e2.message.substring(0, 100)}`); }
+      }
+    } else {
+      console.log('[Warranty] GEEN km veld gevonden!');
+    }
+
+    if (emailField) {
+      try {
+        await emailField.handle.fill(customerEmail);
+        emailFilled = true;
+        console.log(`[Warranty] Email ingevuld: ${customerEmail}`);
+      } catch (e) {
+        console.log(`[Warranty] Email fill FOUT: ${e.message.substring(0, 150)}`);
+        try {
+          await emailField.handle.evaluate((el, val) => {
+            el.value = val;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }, customerEmail);
+          emailFilled = true;
+          console.log('[Warranty] Email ingevuld via JS evaluate fallback');
+        } catch (e2) { console.log(`[Warranty] Email JS evaluate ook mislukt: ${e2.message.substring(0, 100)}`); }
+      }
+    } else {
+      console.log('[Warranty] GEEN email veld gevonden!');
+    }
+
+    // Stap 5: Als een veld nog niet gevuld is, wacht 3s en probeer opnieuw (Angular re-render)
+    if (!kmFilled || !emailFilled) {
+      console.log(`[Warranty] Retry na 3s wacht (km=${kmFilled}, email=${emailFilled})...`);
       await formPage.evaluate(() => document.body?.click()).catch(() => {});
       await formPage.waitForTimeout(3000);
 
       const retryHandles = await formPage.$$('input');
       for (const handle of retryHandles) {
+        if (kmFilled && emailFilled) break;
         try {
           const info = await handle.evaluate(el => ({
             type: el.type, disabled: el.disabled, readOnly: el.readOnly,
             visible: el.offsetParent !== null, value: el.value || '',
-            id: el.id, name: el.name
+            id: el.id, name: el.name,
+            mffDisabled: el.closest('mat-form-field')?.classList.contains('mat-form-field-disabled') || false
           }));
-          if (info.disabled || info.readOnly || !info.visible) continue;
-          if (['hidden', 'checkbox', 'radio', 'submit', 'button', 'image', 'number'].includes(info.type)) continue;
-          if (info.value && info.value.trim() !== '' && info.value !== String(kmStand)) continue;
-          await handle.fill(customerEmail);
-          emailFilled = true;
-          console.log(`[Warranty] Email na retry: type=${info.type}, id=${info.id}, name=${info.name}`);
-          break;
+          if (info.disabled || info.readOnly || !info.visible || info.mffDisabled) continue;
+          if (['hidden', 'checkbox', 'radio', 'submit', 'button', 'image'].includes(info.type)) continue;
+
+          if (!kmFilled && (info.type === 'number' || (!info.value || info.value.trim() === ''))) {
+            if (info.type === 'number') {
+              await handle.fill(String(kmStand));
+              kmFilled = true;
+              console.log(`[Warranty] Km retry: type=${info.type}, id=${info.id}`);
+              continue;
+            }
+          }
+          if (!emailFilled && info.type !== 'number') {
+            if (!info.value || info.value.trim() === '' || info.value.includes('@')) {
+              await handle.fill(customerEmail);
+              emailFilled = true;
+              console.log(`[Warranty] Email retry: type=${info.type}, id=${info.id}`);
+            }
+          }
         } catch (e) { continue; }
       }
     }
