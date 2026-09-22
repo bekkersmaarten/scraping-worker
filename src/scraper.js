@@ -3034,6 +3034,72 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     }
 
     // ══════════════════════════════════════════════════════════════
+    // STAP 7b: Sync DOM-waarden naar Angular FormControls
+    // Playwright .fill() zet de DOM value, maar Angular's reactive form
+    // pakt het niet altijd op. Sync nu via ng API.
+    // ══════════════════════════════════════════════════════════════
+    console.log('[Warranty] STAP 7b: Angular FormControl sync na invullen...');
+    const syncResult = await formPage.evaluate((args) => {
+      const { km, email } = args;
+      try {
+        if (typeof ng === 'undefined') return 'ng niet beschikbaar';
+        const formEl = document.querySelector('form');
+        if (!formEl) return 'geen form';
+        const comp = ng.getComponent(formEl) || ng.getOwningComponent(formEl);
+        if (!comp) return 'geen component';
+
+        let formGroup = null;
+        for (const key of Object.keys(comp)) {
+          const val = comp[key];
+          if (val && val.controls && typeof val.markAllAsTouched === 'function') {
+            formGroup = val;
+            break;
+          }
+        }
+        if (!formGroup) return 'geen FormGroup';
+
+        const synced = [];
+        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
+          const nameLower = name.toLowerCase();
+          // Sync km
+          if ((nameLower.includes('km') || nameLower.includes('kilo') || nameLower.includes('mileage') || nameLower.includes('mile')) && km) {
+            if (!ctrl.value || ctrl.value === '' || ctrl.value === 0 || ctrl.value === '0') {
+              ctrl.setValue(parseInt(km) || km);
+              ctrl.markAsDirty();
+              ctrl.updateValueAndValidity();
+              synced.push(`${name}=${km}`);
+            }
+          }
+          // Sync email
+          else if ((nameLower.includes('mail') || nameLower.includes('email') || nameLower.includes('courriel')) && email) {
+            if (!ctrl.value || ctrl.value === '') {
+              ctrl.setValue(email);
+              ctrl.markAsDirty();
+              ctrl.updateValueAndValidity();
+              synced.push(`${name}=email`);
+            }
+          }
+        }
+
+        // Ook: sync ALLE lege controls vanuit hun DOM input element
+        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
+          if (!ctrl.valid && (ctrl.value === '' || ctrl.value === null || ctrl.value === undefined)) {
+            const el = document.querySelector(`[formcontrolname="${name}"], #${name}, [name="${name}"]`);
+            if (el && el.value) {
+              ctrl.setValue(el.type === 'number' ? Number(el.value) : el.value);
+              ctrl.markAsDirty();
+              ctrl.updateValueAndValidity();
+              synced.push(`${name}=DOM:${el.value.substring(0, 15)}`);
+            }
+          }
+        }
+        formGroup.updateValueAndValidity();
+        return synced.length > 0 ? `Synced: ${synced.join(', ')}` : 'alle controls al in sync';
+      } catch (e) { return `sync error: ${e.message}`; }
+    }, { km: String(kmStand), email: customerEmail });
+    console.log(`[Warranty] FormControl sync: ${syncResult}`);
+
+    // ══════════════════════════════════════════════════════════════
     // STAP 8: ALLE toggles/checkboxes aanvinken (agreement velden)
     // Zoek op formPage (kan iframe zijn) EN warrantyPage
     // Typen: mat-slide-toggle, mat-checkbox, input[type="checkbox"]
@@ -3111,17 +3177,23 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
         // BELANGRIJK: Klik de mat-checkbox wrapper, NIET de native input!
         // Dit triggert Angular's interne change handler die de FormControl update.
         console.log(`[Warranty] Klik mat-checkbox wrapper voor: "${cbInfo.labelText}"`);
-        await cb.evaluate(el => {
-          const matCb = el.closest('mat-checkbox');
-          // Probeer de label of mdc-form-field te klikken (meest betrouwbaar)
-          const clickTarget = matCb.querySelector('.mdc-form-field label, .mdc-form-field, .mat-checkbox-layout, label');
-          if (clickTarget) {
-            clickTarget.click();
-          } else {
-            matCb.click();
+
+        // Methode A: Playwright .click() op de mat-checkbox label (meest betrouwbaar voor Angular)
+        const matWrapperHandle = await cb.evaluateHandle(el => el.closest('mat-checkbox'));
+        const matWrapperEl = matWrapperHandle.asElement();
+        if (matWrapperEl) {
+          try {
+            const labelHandle = await matWrapperEl.$('.mat-checkbox-layout, .mdc-form-field, label');
+            if (labelHandle) {
+              await labelHandle.click({ force: true });
+            } else {
+              await matWrapperEl.click({ force: true });
+            }
+            await formPage.waitForTimeout(800);
+          } catch (e) {
+            console.log(`[Warranty] Playwright mat-checkbox click fout: ${e.message}`);
           }
-        });
-        await formPage.waitForTimeout(800);
+        }
 
         // Verifieer of Angular het heeft opgepikt
         const afterClick = await cb.evaluate(el => {
@@ -3134,34 +3206,56 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
         });
         console.log(`[Warranty] Na mat-checkbox klik: native=${afterClick.nativeChecked}, matCb=${afterClick.matCbChecked}, aria=${afterClick.ariaChecked}`);
 
-        // Als mat-checkbox wrapper-klik niet werkte, probeer Playwright click op wrapper element
+        // Methode B: Als Playwright click niet werkte, probeer JS click
         if (!afterClick.nativeChecked || !afterClick.matCbChecked) {
-          console.log('[Warranty] Mat-checkbox wrapper klik niet succesvol, probeer Playwright click...');
-          const matWrapper = await cb.evaluateHandle(el => el.closest('mat-checkbox'));
-          try {
-            await matWrapper.asElement().click({ force: true });
-            await formPage.waitForTimeout(500);
-          } catch (e) {
-            console.log(`[Warranty] Playwright mat-checkbox click fout: ${e.message}`);
-          }
+          console.log('[Warranty] Playwright click niet succesvol, probeer JS click...');
+          await cb.evaluate(el => {
+            const matCb = el.closest('mat-checkbox');
+            const clickTarget = matCb.querySelector('.mat-checkbox-layout, .mdc-form-field label, .mdc-form-field, label');
+            if (clickTarget) { clickTarget.click(); } else { matCb.click(); }
+          });
+          await formPage.waitForTimeout(800);
         }
 
-        // Als het ALSNOG niet werkt, forceer native + dispatch Angular events
+        // Methode C: Forceer native state + Angular FormControl via ng API
         const finalCheck = await cb.evaluate(el => el.checked);
         if (!finalCheck) {
-          console.log('[Warranty] Forceer checkbox checked + Angular events...');
+          console.log('[Warranty] Forceer checkbox checked + Angular FormControl...');
           await cb.evaluate(el => {
             el.checked = true;
             el.dispatchEvent(new Event('change', { bubbles: true }));
             el.dispatchEvent(new Event('input', { bubbles: true }));
-            // Probeer ook Angular zone te triggeren
             const matCb = el.closest('mat-checkbox');
             if (matCb) {
               matCb.classList.add('mat-checkbox-checked', 'mat-mdc-checkbox-checked');
               matCb.setAttribute('aria-checked', 'true');
             }
+            // Probeer Angular FormControl direct te updaten
+            try {
+              if (typeof ng !== 'undefined') {
+                const formEl = el.closest('form');
+                if (formEl) {
+                  const comp = ng.getComponent(formEl) || ng.getOwningComponent(formEl);
+                  if (comp) {
+                    for (const key of Object.keys(comp)) {
+                      const fg = comp[key];
+                      if (fg && fg.controls) {
+                        for (const [ctrlName, ctrl] of Object.entries(fg.controls)) {
+                          if (ctrl.value === false || ctrl.value === null) {
+                            ctrl.setValue(true);
+                            ctrl.markAsDirty();
+                            ctrl.updateValueAndValidity();
+                          }
+                        }
+                        fg.updateValueAndValidity();
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (e) { /* Angular API niet beschikbaar */ }
           });
-          await formPage.waitForTimeout(300);
+          await formPage.waitForTimeout(500);
         }
       } else {
         // Gewone checkbox (geen mat-checkbox wrapper) — klik direct
@@ -3344,7 +3438,8 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       console.log(`[Warranty] ${angularDebug.invalidControls.length} ongeldige Angular form controls gevonden!`);
 
       // Probeer Angular form controls programmatisch te zetten via ng API
-      const fixResult = await formPage.evaluate(() => {
+      const fixResult = await formPage.evaluate((args) => {
+        const { kmStand, customerEmail } = args;
         try {
           if (typeof ng === 'undefined' || !ng.getComponent) return 'ng API niet beschikbaar';
 
@@ -3365,21 +3460,62 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
           }
           if (!formGroup) return 'geen FormGroup gevonden';
 
-          // Zet alle boolean controls op true (voor checkboxes/toggles)
+          // Log alle controls met hun status
+          const status = {};
+          for (const [name, ctrl] of Object.entries(formGroup.controls)) {
+            status[name] = { valid: ctrl.valid, value: ctrl.value, errors: ctrl.errors ? JSON.stringify(ctrl.errors) : null };
+          }
+          const statusStr = JSON.stringify(status);
+
           const fixed = [];
           for (const [name, ctrl] of Object.entries(formGroup.controls)) {
-            if (!ctrl.valid && (ctrl.value === false || ctrl.value === null || ctrl.value === '')) {
-              if (typeof ctrl.value === 'boolean' || ctrl.value === null) {
+            if (!ctrl.valid) {
+              // Boolean controls (checkboxes/toggles) → zet op true
+              if (ctrl.value === false || ctrl.value === null) {
                 ctrl.setValue(true);
-                fixed.push(name);
+                ctrl.markAsDirty();
+                ctrl.updateValueAndValidity();
+                fixed.push(`${name}=true`);
+              }
+              // Lege string controls → sync waarde vanuit DOM input
+              else if (ctrl.value === '' || ctrl.value === undefined) {
+                // Probeer het DOM element te vinden en de waarde te synchen
+                const el = document.querySelector(`[formcontrolname="${name}"], #${name}, [name="${name}"]`);
+                if (el && el.value) {
+                  ctrl.setValue(el.value);
+                  ctrl.markAsDirty();
+                  ctrl.updateValueAndValidity();
+                  fixed.push(`${name}=DOM:${el.value.substring(0, 20)}`);
+                } else {
+                  // Probeer km/email op basis van control naam
+                  const nameLower = name.toLowerCase();
+                  if ((nameLower.includes('km') || nameLower.includes('kilo') || nameLower.includes('mileage')) && kmStand) {
+                    ctrl.setValue(String(kmStand));
+                    ctrl.markAsDirty();
+                    ctrl.updateValueAndValidity();
+                    fixed.push(`${name}=km:${kmStand}`);
+                  } else if ((nameLower.includes('mail') || nameLower.includes('email') || nameLower.includes('courriel')) && customerEmail) {
+                    ctrl.setValue(customerEmail);
+                    ctrl.markAsDirty();
+                    ctrl.updateValueAndValidity();
+                    fixed.push(`${name}=email`);
+                  }
+                }
+              }
+              // Numerieke controls met waarde maar validation error → forceer update
+              else if (ctrl.value !== '' && ctrl.value !== null && ctrl.value !== undefined) {
+                ctrl.markAsDirty();
+                ctrl.updateValueAndValidity();
+                fixed.push(`${name}=revalidate`);
               }
             }
           }
-          return fixed.length > 0 ? `Fixed controls: ${fixed.join(', ')}` : 'geen fixbare controls';
+          formGroup.updateValueAndValidity();
+          return `Controls: ${statusStr}\nFixed: ${fixed.length > 0 ? fixed.join(', ') : 'geen fixbare controls'}`;
         } catch (e) {
           return `fix error: ${e.message}`;
         }
-      });
+      }, { kmStand: String(kmStand), customerEmail });
       console.log(`[Warranty] Angular form fix poging: ${fixResult}`);
       await formPage.waitForTimeout(500);
     }
@@ -3590,10 +3726,89 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
 
       // Form is ng-invalid = verplicht veld niet gevuld
       if (formState.ngInvalid) {
-        console.log(`[Warranty] Formulier ng-invalid na submit`);
+        // Haal details op over welke controls invalid zijn
+        const invalidDetails = await formPage.evaluate(() => {
+          const details = [];
+          // Check ng-invalid elementen
+          document.querySelectorAll('.ng-invalid:not(form):not(fieldset)').forEach(el => {
+            details.push({
+              tag: el.tagName?.toLowerCase(),
+              type: el.type || el.getAttribute('type') || '',
+              name: el.name || el.getAttribute('formControlName') || '',
+              value: el.value !== undefined ? String(el.value).substring(0, 30) : '',
+              checked: el.checked,
+              text: el.textContent?.trim()?.substring(0, 40) || '',
+              label: el.closest('mat-form-field')?.querySelector('mat-label')?.textContent?.trim() || ''
+            });
+          });
+          // Check Angular form controls via ng API
+          try {
+            if (typeof ng !== 'undefined') {
+              const formEl = document.querySelector('form');
+              const comp = ng.getComponent(formEl) || ng.getOwningComponent(formEl);
+              if (comp) {
+                for (const key of Object.keys(comp)) {
+                  const val = comp[key];
+                  if (val && val.controls) {
+                    for (const [name, ctrl] of Object.entries(val.controls)) {
+                      if (!ctrl.valid) {
+                        details.push({ ngControl: name, value: JSON.stringify(ctrl.value)?.substring(0, 30), errors: JSON.stringify(ctrl.errors) });
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          } catch (e) {}
+          return details;
+        }).catch(() => []);
+
+        const detailStr = invalidDetails.map(d => d.ngControl ? `${d.ngControl}(val=${d.value},err=${d.errors})` : `${d.tag}[${d.name||d.label||d.type}]`).join(', ');
+        console.log(`[Warranty] Formulier ng-invalid na submit. Ongeldige velden: ${JSON.stringify(invalidDetails)}`);
+
+        // Als het poging 1 is, probeer Angular form controls te fixen en re-submit
+        if (attempt === 1) {
+          console.log('[Warranty] Probeer Angular form controls te fixen voor retry...');
+          await formPage.evaluate(() => {
+            try {
+              if (typeof ng === 'undefined') return;
+              const formEl = document.querySelector('form');
+              const comp = ng.getComponent(formEl) || ng.getOwningComponent(formEl);
+              if (!comp) return;
+              for (const key of Object.keys(comp)) {
+                const fg = comp[key];
+                if (fg && fg.controls && typeof fg.markAllAsTouched === 'function') {
+                  for (const [name, ctrl] of Object.entries(fg.controls)) {
+                    if (!ctrl.valid) {
+                      // Probeer boolean controls (checkboxes) op true te zetten
+                      if (ctrl.value === false || ctrl.value === null) {
+                        ctrl.setValue(true);
+                        ctrl.markAsDirty();
+                        ctrl.updateValueAndValidity();
+                      }
+                      // Probeer lege strings te fixen met het DOM-element zijn waarde
+                      if (ctrl.value === '' || ctrl.value === null) {
+                        const el = document.querySelector(`[formcontrolname="${name}"], #${name}, [name="${name}"]`);
+                        if (el && el.value) {
+                          ctrl.setValue(el.value);
+                          ctrl.markAsDirty();
+                          ctrl.updateValueAndValidity();
+                        }
+                      }
+                    }
+                  }
+                  fg.updateValueAndValidity();
+                }
+              }
+            } catch (e) { console.log('Fix error:', e.message); }
+          });
+          await formPage.waitForTimeout(1000);
+          continue; // Retry submit
+        }
+
         submitResult = {
           status: 'error',
-          message: 'Formulier niet ingediend (verplicht veld niet gevuld)',
+          message: `Formulier niet ingediend (verplicht veld niet gevuld: ${detailStr || 'onbekend'})`,
           result_text: resultText.substring(0, 500)
         };
         break;
