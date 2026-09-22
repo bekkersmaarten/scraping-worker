@@ -2972,13 +2972,113 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       }
     }
 
+    // STRATEGIE 5: Email retry na km — sommige Angular forms tonen email pas na km is ingevuld
+    if (kmFilled && !emailFilled) {
+      console.log('[Warranty] Km wel ingevuld maar email niet — wacht 3s en probeer opnieuw...');
+      // Trigger Angular change detection door te klikken buiten het km-veld
+      await formPage.evaluate(() => document.body?.click()).catch(() => {});
+      await formPage.waitForTimeout(3000);
+
+      // Herscanner alle velden (inclusief nieuw verschenen en pre-filled)
+      const retryDiag = await formPage.evaluate(() => {
+        const all = Array.from(document.querySelectorAll('input, textarea, select'));
+        return all.map(el => ({
+          tag: el.tagName, type: el.type, name: el.name, id: el.id,
+          placeholder: el.placeholder || '', value: el.value?.substring(0, 50) || '',
+          disabled: el.disabled, readOnly: el.readOnly || false,
+          visible: el.offsetParent !== null,
+          matLabel: el.closest('mat-form-field')?.querySelector('mat-label')?.textContent?.trim() || '',
+          parentText: el.closest('div, mat-form-field')?.textContent?.trim()?.substring(0, 200) || '',
+          ariaLabel: el.getAttribute('aria-label') || '',
+          outerHTML: el.outerHTML?.substring(0, 300) || ''
+        }));
+      });
+      console.log(`[Warranty] Email retry: ${retryDiag.length} totale form elementen na wacht`);
+      retryDiag.forEach((f, i) => console.log(`[Warranty]   RETRY[${i}]: tag=${f.tag}, type=${f.type}, name=${f.name}, id=${f.id}, placeholder="${f.placeholder}", matLabel="${f.matLabel}", value="${f.value}", visible=${f.visible}, disabled=${f.disabled}, outerHTML=${f.outerHTML.substring(0, 150)}`));
+
+      // Probeer opnieuw met brede keywords
+      for (const field of retryDiag) {
+        if (emailFilled) break;
+        if (field.disabled || field.readOnly || !field.visible) continue;
+        if (field.type === 'hidden' || field.type === 'checkbox' || field.type === 'radio' || field.type === 'submit' || field.type === 'button' || field.type === 'image') continue;
+
+        const searchText = [field.name, field.id, field.placeholder, field.matLabel, field.parentText, field.ariaLabel].join(' ').toLowerCase();
+        if (searchText.includes('mail') || searchText.includes('e-mail') || searchText.includes('email') || searchText.includes('courriel') || searchText.includes('adresse') || searchText.includes('contact')) {
+          try {
+            const el = await formPage.$(`#${CSS.escape ? field.id : field.id}`) ||
+                        await formPage.$(`[name="${field.name}"]`) ||
+                        await formPage.$(field.tag.toLowerCase() + `[placeholder="${field.placeholder}"]`);
+            if (el) {
+              await el.fill(customerEmail);
+              emailFilled = true;
+              console.log(`[Warranty] Email retry: ingevuld via ${field.id || field.name || field.matLabel}`);
+            }
+          } catch (e) {
+            console.log(`[Warranty] Email retry fill fout: ${e.message.substring(0, 100)}`);
+          }
+        }
+      }
+
+      // Pre-filled email veld? Zoek inputs met "@" in de waarde en overschrijf
+      if (!emailFilled) {
+        for (const field of retryDiag) {
+          if (emailFilled) break;
+          if (field.disabled || field.readOnly || !field.visible) continue;
+          if (field.type === 'hidden' || field.type === 'checkbox' || field.type === 'radio' || field.type === 'submit' || field.type === 'button' || field.type === 'image') continue;
+          if (field.value && field.value.includes('@')) {
+            console.log(`[Warranty] Pre-filled email veld gevonden: value="${field.value}", id=${field.id}, name=${field.name}`);
+            try {
+              const el = field.id ? await formPage.$(`#${field.id}`) :
+                         field.name ? await formPage.$(`[name="${field.name}"]`) : null;
+              if (el) {
+                await el.fill(customerEmail);
+                emailFilled = true;
+                console.log(`[Warranty] Pre-filled email overschreven met ${customerEmail}`);
+              }
+            } catch (e) {
+              console.log(`[Warranty] Pre-filled email fill fout: ${e.message.substring(0, 100)}`);
+            }
+          }
+        }
+      }
+
+      // Allerlaatste poging: vul het eerste lege zichtbare enabled veld dat NIET het km veld is
+      if (!emailFilled) {
+        console.log('[Warranty] Allerlaatste poging: eerste lege niet-km veld...');
+        const retryFillable = await formPage.$$('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]):not([type="image"]), textarea');
+        for (const input of retryFillable) {
+          try {
+            const val = await input.inputValue().catch(() => '');
+            const isVisible = await input.isVisible().catch(() => false);
+            const isDisabled = await input.evaluate(el => el.disabled || el.readOnly).catch(() => true);
+            // Skip het km-veld (heeft nu een numerieke waarde)
+            if (val === String(kmStand)) continue;
+            if ((!val || val.trim() === '') && isVisible && !isDisabled) {
+              await input.fill(customerEmail);
+              emailFilled = true;
+              const fieldId = await input.evaluate(el => el.id || el.name || el.type).catch(() => '?');
+              console.log(`[Warranty] Email ingevuld in eerste lege niet-km veld: ${fieldId}`);
+              break;
+            }
+          } catch (e) { continue; }
+        }
+      }
+    }
+
     if (!kmFilled || !emailFilled) {
       // Uitgebreide foutmelding met diagnostiek
       const diagUrl = await formPage.evaluate(() => window.location.href).catch(() => 'unknown');
-      const diagBody = await formPage.evaluate(() => document.body?.innerText?.substring(0, 300) || '').catch(() => '');
+      const diagBody = await formPage.evaluate(() => document.body?.innerText?.substring(0, 500) || '').catch(() => '');
       console.log(`[Warranty] Formulier incompleet: km=${kmFilled}, email=${emailFilled}`);
       console.log(`[Warranty] Fout URL: ${diagUrl}`);
       console.log(`[Warranty] Fout body: ${diagBody}`);
+
+      // Dump ALLE HTML elementen voor diagnose
+      const fullDiag = await formPage.evaluate(() => {
+        return document.body?.innerHTML?.substring(0, 5000) || '';
+      }).catch(() => '');
+      console.log(`[Warranty] VOLLEDIGE HTML (eerste 3000): ${fullDiag.substring(0, 3000)}`);
+
       await warrantyPage.screenshot({ path: `warranty-form-debug-${Date.now()}.png` });
       await browser.close();
       return { status: 'error', vin, message: `Kon formulier niet volledig invullen (km: ${kmFilled}, email: ${emailFilled}). URL: ${diagUrl.substring(0, 80)}`, vehicle: vehicleData };
