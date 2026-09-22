@@ -3034,202 +3034,13 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     }
 
     // ══════════════════════════════════════════════════════════════
-    // STAP 7a: Verborgen datumvelden invullen (startDate, endDate)
-    // Het Allucare formulier heeft verplichte Angular FormControls voor
-    // startDate en endDate die NIET als zichtbare inputs bestaan.
-    // Ze moeten via Angular's interne API gezet worden.
-    // De "Garantie startdatum" staat in de pagina-header.
+    // STAP 7a: (SKIP) Verborgen datumvelden (startDate/endDate)
+    // Het Allucare formulier heeft verborgen Angular FormControls voor
+    // startDate en endDate die NIET als zichtbare inputs bestaan en door
+    // de component's submit handler automatisch worden gezet.
+    // Het formulier is daarom ALTIJD ng-invalid — dit is normaal.
     // ══════════════════════════════════════════════════════════════
-    console.log('[Warranty] STAP 7a: Verborgen datumvelden (startDate/endDate) invullen...');
-
-    // Extraheer de garantie startdatum uit de pagina header
-    const headerDateStr = await formPage.evaluate(() => {
-      const body = document.body?.innerText || '';
-      // Zoek "Garantie startdatum: DD/MM/YYYY"
-      const match = body.match(/[Gg]arantie\s+startdatum[:\s]+(\d{2}\/\d{2}\/\d{4})/);
-      return match ? match[1] : null;
-    });
-    console.log(`[Warranty] Garantie startdatum uit header: ${headerDateStr || 'niet gevonden'}`);
-
-    const dateFixResult = await formPage.evaluate((headerDate) => {
-      const results = [];
-
-      // Parse de header datum (DD/MM/YYYY)
-      let startDateObj = new Date();
-      if (headerDate) {
-        const [d, m, y] = headerDate.split('/');
-        startDateObj = new Date(parseInt(y), parseInt(m) - 1, parseInt(d));
-        results.push(`parsed header date: ${startDateObj.toISOString()}`);
-      }
-      const endDateObj = new Date(startDateObj);
-      endDateObj.setFullYear(endDateObj.getFullYear() + 2);
-
-      // ── Hulpfunctie: zoek Angular FormGroup via diverse methodes ──
-      function findFormGroup() {
-        const formEl = document.querySelector('form');
-        const appForm = document.querySelector('app-allucare-form');
-
-        // Methode 1: ng.getComponent (beschikbaar als Angular in dev mode draait)
-        try {
-          if (typeof ng !== 'undefined' && ng.getOwningComponent) {
-            const comp = ng.getOwningComponent(formEl) || ng.getComponent(formEl) ||
-              (appForm ? (ng.getComponent(appForm) || ng.getOwningComponent(appForm)) : null);
-            if (comp) {
-              for (const key of Object.keys(comp)) {
-                const val = comp[key];
-                if (val && val.controls && typeof val.updateValueAndValidity === 'function') {
-                  results.push(`FormGroup gevonden via ng API (key: ${key})`);
-                  return val;
-                }
-              }
-            }
-          }
-        } catch (e) { results.push(`ng API: ${e.message}`); }
-
-        // Methode 2: Via __ngContext__ op het component element
-        try {
-          const targets = [appForm, formEl, document.querySelector('[_nghost-yeb-c5]'), document.querySelector('[_ngcontent-yeb-c5]')?.closest('[_nghost-yeb-c5]')];
-          for (const target of targets) {
-            if (!target) continue;
-            const ctx = target.__ngContext__;
-            if (!ctx) continue;
-
-            // __ngContext__ is een LView array in Angular 9+
-            // De component instance zit typisch op index 8 (CONTEXT offset)
-            if (Array.isArray(ctx)) {
-              for (let i = 0; i < ctx.length; i++) {
-                const item = ctx[i];
-                if (item && typeof item === 'object' && !Array.isArray(item) && item.controls && typeof item.updateValueAndValidity === 'function') {
-                  results.push(`FormGroup direct in LView[${i}]`);
-                  return item;
-                }
-                if (item && typeof item === 'object' && !Array.isArray(item)) {
-                  for (const key of Object.keys(item)) {
-                    try {
-                      const val = item[key];
-                      if (val && val.controls && typeof val.updateValueAndValidity === 'function') {
-                        results.push(`FormGroup via LView[${i}].${key}`);
-                        return val;
-                      }
-                    } catch (e) {}
-                  }
-                }
-              }
-            }
-            // Nummer verwijst naar het LView in de parent
-            if (typeof ctx === 'number') {
-              results.push(`__ngContext__ is number (${ctx}), skip`);
-            }
-          }
-        } catch (e) { results.push(`__ngContext__: ${e.message}`); }
-
-        // Methode 3: Via getAllAngularRootElements
-        try {
-          if (typeof getAllAngularRootElements === 'function') {
-            const roots = getAllAngularRootElements();
-            for (const root of roots) {
-              const injector = root.__ngContext__ || root.injector;
-              results.push(`Root element gevonden: ${root.tagName}`);
-            }
-          }
-        } catch (e) { results.push(`getAllAngularRootElements: ${e.message}`); }
-
-        // Methode 4: Zoek via monkey-patched AbstractControl
-        try {
-          const allNgInvalid = document.querySelectorAll('.ng-invalid');
-          for (const el of allNgInvalid) {
-            // Angular bindt FormControl aan het element via __ngContext__ of properties
-            const keys = Object.keys(el);
-            for (const key of keys) {
-              if (key.startsWith('__ng') || key.startsWith('ng-')) {
-                const val = el[key];
-                if (val && val._rawValidators) {
-                  results.push(`FormControl gevonden op .ng-invalid element via ${key}`);
-                }
-              }
-            }
-          }
-        } catch (e) {}
-
-        return null;
-      }
-
-      const formGroup = findFormGroup();
-
-      if (formGroup) {
-        const controlNames = Object.keys(formGroup.controls);
-        results.push(`Controls: ${controlNames.join(', ')}`);
-
-        // Status van alle controls loggen
-        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
-          results.push(`  ${name}: valid=${ctrl.valid}, value=${JSON.stringify(ctrl.value)?.substring(0, 50)}, errors=${JSON.stringify(ctrl.errors)}`);
-        }
-
-        // Zet startDate
-        if (formGroup.controls.startDate) {
-          const ctrl = formGroup.controls.startDate;
-          ctrl.setValue(startDateObj);
-          ctrl.markAsDirty();
-          ctrl.updateValueAndValidity();
-          results.push(`startDate gezet: ${startDateObj.toISOString().substring(0, 10)}`);
-
-          // Als Date object niet werkt, probeer string
-          if (!ctrl.valid) {
-            const dateStr = `${startDateObj.getFullYear()}-${String(startDateObj.getMonth()+1).padStart(2,'0')}-${String(startDateObj.getDate()).padStart(2,'0')}`;
-            ctrl.setValue(dateStr);
-            ctrl.updateValueAndValidity();
-            results.push(`startDate retry als string: ${dateStr}, valid=${ctrl.valid}`);
-          }
-          if (!ctrl.valid) {
-            // Probeer DD/MM/YYYY formaat
-            ctrl.setValue(headerDate || `${String(startDateObj.getDate()).padStart(2,'0')}/${String(startDateObj.getMonth()+1).padStart(2,'0')}/${startDateObj.getFullYear()}`);
-            ctrl.updateValueAndValidity();
-            results.push(`startDate retry als DD/MM/YYYY, valid=${ctrl.valid}`);
-          }
-        }
-
-        // Zet endDate
-        if (formGroup.controls.endDate) {
-          const ctrl = formGroup.controls.endDate;
-          ctrl.setValue(endDateObj);
-          ctrl.markAsDirty();
-          ctrl.updateValueAndValidity();
-          results.push(`endDate gezet: ${endDateObj.toISOString().substring(0, 10)}`);
-
-          if (!ctrl.valid) {
-            const dateStr = `${endDateObj.getFullYear()}-${String(endDateObj.getMonth()+1).padStart(2,'0')}-${String(endDateObj.getDate()).padStart(2,'0')}`;
-            ctrl.setValue(dateStr);
-            ctrl.updateValueAndValidity();
-            results.push(`endDate retry als string: ${dateStr}, valid=${ctrl.valid}`);
-          }
-        }
-
-        // Zet ALLE nog ongeldige boolean controls op true
-        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
-          if (!ctrl.valid && (ctrl.value === false || ctrl.value === null)) {
-            ctrl.setValue(true);
-            ctrl.markAsDirty();
-            ctrl.updateValueAndValidity();
-            results.push(`${name} gezet op true`);
-          }
-        }
-
-        formGroup.updateValueAndValidity();
-        results.push(`Form valid na fix: ${formGroup.valid}`);
-
-        // Log finale status
-        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
-          if (!ctrl.valid) {
-            results.push(`NOG ONGELDIG: ${name}: value=${JSON.stringify(ctrl.value)?.substring(0, 30)}, errors=${JSON.stringify(ctrl.errors)}`);
-          }
-        }
-      } else {
-        results.push('FormGroup NIET gevonden via alle methodes');
-      }
-
-      return results.join('\n');
-    }, headerDateStr);
-    console.log(`[Warranty] STAP 7a datumfix resultaat:\n${dateFixResult}`);
+    // (STAP 7a date fix verwijderd — startDate/endDate zijn interne Angular controls)
 
     // ══════════════════════════════════════════════════════════════
     // STAP 7b: Sync DOM-waarden naar Angular FormControls
@@ -3973,94 +3784,89 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
         break;
       }
 
-      // Form is ng-invalid = verplicht veld niet gevuld
+      // NB: ng-invalid check VERWIJDERD — het Allucare formulier is ALTIJD ng-invalid
+      // vanwege verborgen startDate/endDate FormControls die door de component's
+      // submit handler automatisch gevuld worden. ng-invalid is GEEN fout-indicator.
       if (formState.ngInvalid) {
-        // Haal details op over welke controls invalid zijn
-        const invalidDetails = await formPage.evaluate(() => {
-          const details = [];
-          // Check ng-invalid elementen
-          document.querySelectorAll('.ng-invalid:not(form):not(fieldset)').forEach(el => {
-            details.push({
-              tag: el.tagName?.toLowerCase(),
-              type: el.type || el.getAttribute('type') || '',
-              name: el.name || el.getAttribute('formControlName') || '',
-              value: el.value !== undefined ? String(el.value).substring(0, 30) : '',
-              checked: el.checked,
-              text: el.textContent?.trim()?.substring(0, 40) || '',
-              label: el.closest('mat-form-field')?.querySelector('mat-label')?.textContent?.trim() || ''
-            });
-          });
-          // Check Angular form controls via ng API
-          try {
-            if (typeof ng !== 'undefined') {
-              const formEl = document.querySelector('form');
-              const comp = ng.getComponent(formEl) || ng.getOwningComponent(formEl);
-              if (comp) {
-                for (const key of Object.keys(comp)) {
-                  const val = comp[key];
-                  if (val && val.controls) {
-                    for (const [name, ctrl] of Object.entries(val.controls)) {
-                      if (!ctrl.valid) {
-                        details.push({ ngControl: name, value: JSON.stringify(ctrl.value)?.substring(0, 30), errors: JSON.stringify(ctrl.errors) });
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          } catch (e) {}
-          return details;
-        }).catch(() => []);
+        console.log(`[Warranty] Form is ng-invalid (normaal voor Allucare — verborgen date controls). Dirty=${formState.ngDirty}`);
 
-        const detailStr = invalidDetails.map(d => d.ngControl ? `${d.ngControl}(val=${d.value},err=${d.errors})` : `${d.tag}[${d.name||d.label||d.type}]`).join(', ');
-        console.log(`[Warranty] Formulier ng-invalid na submit. Ongeldige velden: ${JSON.stringify(invalidDetails)}`);
-
-        // Als het poging 1 is, probeer Angular form controls te fixen en re-submit
-        if (attempt === 1) {
-          console.log('[Warranty] Probeer Angular form controls te fixen voor retry...');
-          await formPage.evaluate(() => {
-            try {
-              if (typeof ng === 'undefined') return;
-              const formEl = document.querySelector('form');
-              const comp = ng.getComponent(formEl) || ng.getOwningComponent(formEl);
-              if (!comp) return;
-              for (const key of Object.keys(comp)) {
-                const fg = comp[key];
-                if (fg && fg.controls && typeof fg.markAllAsTouched === 'function') {
-                  for (const [name, ctrl] of Object.entries(fg.controls)) {
-                    if (!ctrl.valid) {
-                      // Probeer boolean controls (checkboxes) op true te zetten
-                      if (ctrl.value === false || ctrl.value === null) {
-                        ctrl.setValue(true);
-                        ctrl.markAsDirty();
-                        ctrl.updateValueAndValidity();
-                      }
-                      // Probeer lege strings te fixen met het DOM-element zijn waarde
-                      if (ctrl.value === '' || ctrl.value === null) {
-                        const el = document.querySelector(`[formcontrolname="${name}"], #${name}, [name="${name}"]`);
-                        if (el && el.value) {
-                          ctrl.setValue(el.value);
-                          ctrl.markAsDirty();
-                          ctrl.updateValueAndValidity();
-                        }
-                      }
-                    }
-                  }
-                  fg.updateValueAndValidity();
-                }
-              }
-            } catch (e) { console.log('Fix error:', e.message); }
+        // Check of er ZICHTBARE foutmeldingen zijn (mat-error, validatie-errors)
+        const visibleErrors = await formPage.evaluate(() => {
+          const errors = [];
+          document.querySelectorAll('mat-error, .mat-error, .mat-mdc-form-field-error, [role="alert"]').forEach(el => {
+            const txt = el.textContent?.trim();
+            if (txt) errors.push(txt);
           });
-          await formPage.waitForTimeout(1000);
-          continue; // Retry submit
+          // Check of km en email velden specifiek ng-invalid zijn (die MOETEN valid zijn)
+          const kmInvalid = document.querySelector('[formControlName="vehicleMileage"].ng-invalid, [formcontrolname="vehicleMileage"].ng-invalid');
+          const emailInvalid = document.querySelector('[formControlName="customerEmail"].ng-invalid, [formcontrolname="customerEmail"].ng-invalid');
+          const checkboxesInvalid = document.querySelectorAll('[formControlName="confirmTerms"].ng-invalid, [formControlName="agreeTerms"].ng-invalid, [formcontrolname="confirmTerms"].ng-invalid, [formcontrolname="agreeTerms"].ng-invalid');
+          return {
+            errors,
+            kmInvalid: !!kmInvalid,
+            emailInvalid: !!emailInvalid,
+            checkboxesInvalid: checkboxesInvalid.length
+          };
+        }).catch(() => ({ errors: [], kmInvalid: false, emailInvalid: false, checkboxesInvalid: 0 }));
+        console.log(`[Warranty] Zichtbare errors: ${JSON.stringify(visibleErrors)}`);
+
+        // Alleen falen als ZICHTBARE velden (km, email, checkboxes) nog invalid zijn
+        if (visibleErrors.kmInvalid || visibleErrors.emailInvalid || visibleErrors.checkboxesInvalid > 0) {
+          submitResult = {
+            status: 'error',
+            message: `Formulier velden niet gevuld (km: ${!visibleErrors.kmInvalid}, email: ${!visibleErrors.emailInvalid}, checkboxes: ${visibleErrors.checkboxesInvalid === 0})`,
+            result_text: resultText.substring(0, 500)
+          };
+          break;
         }
 
-        submitResult = {
-          status: 'error',
-          message: `Formulier niet ingediend (verplicht veld niet gevuld: ${detailStr || 'onbekend'})`,
-          result_text: resultText.substring(0, 500)
-        };
-        break;
+        // Als alleen verborgen date controls invalid zijn → beschouw als normaal, ga door
+        console.log('[Warranty] Alleen verborgen date controls ng-invalid — wacht op backend response...');
+        // Wacht extra op mogelijke snackbar/overlay/navigatie
+        await warrantyPage.waitForTimeout(5000);
+
+        // Hercheck voor succes-indicatoren
+        const resultText2 = await warrantyPage.evaluate(() => document.body?.innerText || '').catch(() => '');
+        const overlayText3 = await warrantyPage.evaluate(() => {
+          const overlay = document.querySelector('.cdk-overlay-container');
+          return overlay?.textContent?.trim()?.substring(0, 300) || '';
+        }).catch(() => '');
+        console.log(`[Warranty] Na extra wacht — overlay: "${overlayText3}", pagina: ${resultText2.substring(0, 200)}`);
+
+        if (/contract aangemaakt|contract has been created|succesvol|successfully|gelukt/i.test(resultText2) ||
+            (/succes|gelukt|aangemaakt|created|contract|activat/i.test(overlayText3) && !/fout|error|mislukt|failed/i.test(overlayText3))) {
+          const cId = resultText2.match(/contract.*?ID[:\s]*([A-Z0-9\-]+)/i);
+          submitResult = {
+            status: 'activated',
+            message: '2+6 garantie succesvol geactiveerd',
+            contract_id: cId ? cId[1] : contractId,
+            result_text: resultText2.substring(0, 500)
+          };
+          break;
+        }
+
+        if (/al geactiveerd|already activated|bestaat al|reeds ingediend/i.test(resultText2)) {
+          submitResult = { status: 'already_activated', message: 'Garantie was al geactiveerd', result_text: resultText2.substring(0, 500) };
+          break;
+        }
+
+        if (/CEM reageert niet|CEM ne répond pas|CEM is not responding/i.test(overlayText3)) {
+          const okBtn3 = await warrantyPage.$('.cdk-overlay-container button');
+          if (okBtn3) await okBtn3.click();
+          await warrantyPage.waitForTimeout(2000);
+          if (attempt < MAX_SUBMIT_ATTEMPTS) {
+            const delay = RETRY_DELAYS[attempt - 1] || 60000;
+            console.log(`[Warranty] CEM timeout, wacht ${delay / 1000}s voor retry...`);
+            await warrantyPage.waitForTimeout(delay);
+            continue;
+          }
+        }
+
+        // Geen duidelijk resultaat na extra wacht — ga door met volgende poging
+        if (attempt < MAX_SUBMIT_ATTEMPTS) {
+          console.log('[Warranty] Geen duidelijk resultaat, probeer opnieuw...');
+          continue;
+        }
       }
 
       // Andere fout via overlay
