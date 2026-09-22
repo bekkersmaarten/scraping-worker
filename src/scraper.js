@@ -2616,7 +2616,7 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
 
         // Check of er nu enabled input velden zijn
         const enabledInputs = await formPage.evaluate(() => {
-          const inputs = document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"])');
+          const inputs = document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]):not([type="image"])');
           return Array.from(inputs).map(i => ({
             name: i.name, id: i.id, type: i.type, disabled: i.disabled, readOnly: i.readOnly, visible: i.offsetParent !== null
           }));
@@ -2657,7 +2657,7 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
 
     // Fallback: name/id patronen (voor andere formulier-varianten)
     try {
-      const kmField = formPage.locator('input[name*="ilomet" i], input[id*="ilomet" i], input[name*="ileage" i], input[id*="km" i]').first();
+      const kmField = formPage.locator('input:not([type="image"])[name*="ilomet" i], input:not([type="image"])[id*="ilomet" i], input:not([type="image"])[name*="ileage" i], input:not([type="image"])[id*="km" i]').first();
       if (!kmFilled && await kmField.count() > 0) {
         await kmField.fill(String(kmStand));
         kmFilled = true;
@@ -2666,7 +2666,7 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     } catch (e) { console.log(`[Warranty] km specifieke selector fout: ${e.message.substring(0, 80)}`); }
 
     try {
-      const emailField = formPage.locator('input[name*="mail" i], input[id*="mail" i]').first();
+      const emailField = formPage.locator('input:not([type="image"])[name*="mail" i], input:not([type="image"])[id*="mail" i]').first();
       if (!emailFilled && await emailField.count() > 0) {
         await emailField.fill(customerEmail);
         emailFilled = true;
@@ -2676,7 +2676,7 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
 
     // Fallback: zoek op label/parent tekst
     if (!kmFilled || !emailFilled) {
-      const allInputs = await formPage.$$('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])');
+      const allInputs = await formPage.$$('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]):not([type="image"])');
       console.log(`[Warranty] Fallback: ${allInputs.length} invulbare velden gevonden`);
 
       for (const input of allInputs) {
