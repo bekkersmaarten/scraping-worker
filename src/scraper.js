@@ -3058,6 +3058,12 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
         }
         if (!formGroup) return 'geen FormGroup';
 
+        // Log alle controls met status
+        const allControls = {};
+        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
+          allControls[name] = { valid: ctrl.valid, value: ctrl.value, type: typeof ctrl.value };
+        }
+
         const synced = [];
         for (const [name, ctrl] of Object.entries(formGroup.controls)) {
           const nameLower = name.toLowerCase();
@@ -3079,9 +3085,29 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
               synced.push(`${name}=email`);
             }
           }
+          // Sync datumvelden: startDate → vandaag, endDate → vandaag + 2 jaar
+          else if (nameLower === 'startdate' || nameLower === 'start_date' || nameLower === 'datestart' || nameLower === 'begindatum') {
+            if (!ctrl.value || ctrl.value === '' || ctrl.value === null) {
+              const today = new Date();
+              ctrl.setValue(today);
+              ctrl.markAsDirty();
+              ctrl.updateValueAndValidity();
+              synced.push(`${name}=today(${today.toISOString().substring(0, 10)})`);
+            }
+          }
+          else if (nameLower === 'enddate' || nameLower === 'end_date' || nameLower === 'dateend' || nameLower === 'einddatum') {
+            if (!ctrl.value || ctrl.value === '' || ctrl.value === null) {
+              const endDate = new Date();
+              endDate.setFullYear(endDate.getFullYear() + 2);
+              ctrl.setValue(endDate);
+              ctrl.markAsDirty();
+              ctrl.updateValueAndValidity();
+              synced.push(`${name}=today+2y(${endDate.toISOString().substring(0, 10)})`);
+            }
+          }
         }
 
-        // Ook: sync ALLE lege controls vanuit hun DOM input element
+        // Sync ALLE lege/ongeldige controls vanuit hun DOM input element
         for (const [name, ctrl] of Object.entries(formGroup.controls)) {
           if (!ctrl.valid && (ctrl.value === '' || ctrl.value === null || ctrl.value === undefined)) {
             const el = document.querySelector(`[formcontrolname="${name}"], #${name}, [name="${name}"]`);
@@ -3091,10 +3117,18 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
               ctrl.updateValueAndValidity();
               synced.push(`${name}=DOM:${el.value.substring(0, 15)}`);
             }
+            // Als het een date control is zonder DOM value, zet op vandaag
+            else if (name.toLowerCase().includes('date') || name.toLowerCase().includes('datum')) {
+              const today = new Date();
+              ctrl.setValue(today);
+              ctrl.markAsDirty();
+              ctrl.updateValueAndValidity();
+              synced.push(`${name}=fallback:today`);
+            }
           }
         }
         formGroup.updateValueAndValidity();
-        return synced.length > 0 ? `Synced: ${synced.join(', ')}` : 'alle controls al in sync';
+        return `Controls: ${JSON.stringify(allControls)}\nSynced: ${synced.length > 0 ? synced.join(', ') : 'alle controls al in sync'}`;
       } catch (e) { return `sync error: ${e.message}`; }
     }, { km: String(kmStand), email: customerEmail });
     console.log(`[Warranty] FormControl sync: ${syncResult}`);
@@ -3487,7 +3521,7 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
                   ctrl.updateValueAndValidity();
                   fixed.push(`${name}=DOM:${el.value.substring(0, 20)}`);
                 } else {
-                  // Probeer km/email op basis van control naam
+                  // Probeer km/email/datum op basis van control naam
                   const nameLower = name.toLowerCase();
                   if ((nameLower.includes('km') || nameLower.includes('kilo') || nameLower.includes('mileage')) && kmStand) {
                     ctrl.setValue(String(kmStand));
@@ -3499,6 +3533,23 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
                     ctrl.markAsDirty();
                     ctrl.updateValueAndValidity();
                     fixed.push(`${name}=email`);
+                  } else if (nameLower.includes('startdate') || nameLower.includes('start_date') || nameLower.includes('begindatum')) {
+                    ctrl.setValue(new Date());
+                    ctrl.markAsDirty();
+                    ctrl.updateValueAndValidity();
+                    fixed.push(`${name}=today`);
+                  } else if (nameLower.includes('enddate') || nameLower.includes('end_date') || nameLower.includes('einddatum')) {
+                    const end = new Date();
+                    end.setFullYear(end.getFullYear() + 2);
+                    ctrl.setValue(end);
+                    ctrl.markAsDirty();
+                    ctrl.updateValueAndValidity();
+                    fixed.push(`${name}=today+2y`);
+                  } else if (nameLower.includes('date') || nameLower.includes('datum')) {
+                    ctrl.setValue(new Date());
+                    ctrl.markAsDirty();
+                    ctrl.updateValueAndValidity();
+                    fixed.push(`${name}=today(fallback)`);
                   }
                 }
               }
