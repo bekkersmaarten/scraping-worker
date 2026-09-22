@@ -196,6 +196,38 @@ async function login(page, USERNAME, PASSWORD) {
 }
 
 // =========================================
+// HELPER: Zoek "klik hier" / Allucare links
+// =========================================
+async function findKlikHierLink(pageOrFrame) {
+  try {
+    return await pageOrFrame.evaluate(() => {
+      const links = document.querySelectorAll('a');
+      for (const link of links) {
+        const text = (link.textContent || '').toLowerCase();
+        const href = link.href || link.getAttribute('href') || '';
+        if (!href || href === '#') continue;
+        if (text.includes('klik hier') || text.includes('click here') || text.includes('cliquez ici')) return href;
+        if (href.includes('allucare') || href.includes('idfed')) return href;
+      }
+      return null;
+    });
+  } catch (e) { return null; }
+}
+
+async function findKlikHierLinkInFrame(frame) {
+  // Zoek in het frame zelf EN in eventuele sub-frames
+  let result = await findKlikHierLink(frame);
+  if (result) return result;
+  try {
+    for (const child of frame.childFrames()) {
+      result = await findKlikHierLink(child);
+      if (result) return result;
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+// =========================================
 // ZOEK VOERTUIG & EXTRACT DATA
 // =========================================
 async function searchAndExtractVehicle(page, kenteken) {
@@ -2136,113 +2168,229 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     const vehicleData = await searchAndExtractVehicle(page, vin);
     console.log(`[Warranty] Voertuig gevonden: ${JSON.stringify(vehicleData)}`);
 
-    // STAP 3+4: Navigeer direct naar /stellaCare/ en vind het Allucare formulier
-    // Simpele aanpak: open /stellaCare/ als nieuwe pagina in dezelfde browser context.
-    // De Servicebox server-sessie (cookies) onthoudt welk voertuig geselecteerd is.
-    // De StellaCare pagina toont ofwel:
-    //   A) Een redirect naar Allucare/idfed (het formulier)
-    //   B) Een tussenpagina met "klik hier" link naar Allucare
-    //   C) Een melding dat het voertuig niet in aanmerking komt
+    // STAP 3+4: Navigeer naar StellaCare via het Servicebox frameset
+    // De /stellaCare/ URL werkt niet als losse pagina — het moet via het frameset
+    // geladen worden met goTo('/stellaCare/') of via de frames.
+    // Het frameset herkent het geselecteerde voertuig via de server-sessie (cookies).
 
-    console.log('[Warranty] STAP 3+4 — Open StellaCare pagina direct...');
+    console.log('[Warranty] STAP 3+4 — StellaCare via frameset...');
 
-    // Open /stellaCare/ als nieuwe pagina (deelt cookies/sessie met de vehicle search)
-    const stellaCarePage = await context.newPage();
+    // Navigeer terug naar Servicebox frameset
     try {
-      await stellaCarePage.goto(`${SERVICEBOX_URL}/stellaCare/`, {
-        waitUntil: 'networkidle',
-        timeout: 30000
-      });
+      await page.goto(SERVICEBOX_URL, { waitUntil: 'networkidle', timeout: 30000 });
     } catch (e) {
-      console.log(`[Warranty] StellaCare navigatie timeout (gaat door): ${e.message.substring(0, 100)}`);
+      console.log(`[Warranty] Frameset laden timeout (gaat door): ${e.message.substring(0, 100)}`);
+    }
+    await page.waitForTimeout(3000);
+
+    const framesetUrl = page.url();
+    const allFrameUrls = page.frames().map(f => f.url().substring(0, 100));
+    console.log(`[Warranty] Frameset URL: ${framesetUrl}`);
+    console.log(`[Warranty] Frames (${allFrameUrls.length}): ${allFrameUrls.join(' | ')}`);
+
+    // Zoek goTo() functie in alle frames en voer uit
+    let goToSuccess = false;
+    for (const frame of page.frames()) {
+      try {
+        const hasGoTo = await frame.evaluate(() => typeof goTo === 'function');
+        if (hasGoTo) {
+          console.log(`[Warranty] goTo() gevonden in: ${frame.url().substring(0, 80)}`);
+          await frame.evaluate(() => goTo('/stellaCare/'));
+          goToSuccess = true;
+          console.log('[Warranty] goTo("/stellaCare/") uitgevoerd');
+          break;
+        }
+      } catch (e) {
+        // Frame might be cross-origin or detached
+        continue;
+      }
     }
 
-    const scUrl = stellaCarePage.url();
-    console.log(`[Warranty] StellaCare pagina URL: ${scUrl}`);
+    // Fallback: probeer goTo vanuit main page
+    if (!goToSuccess) {
+      try {
+        await page.evaluate(() => goTo('/stellaCare/'));
+        goToSuccess = true;
+        console.log('[Warranty] goTo("/stellaCare/") uitgevoerd vanuit main page');
+      } catch (e) {
+        console.log(`[Warranty] goTo() niet beschikbaar: ${e.message.substring(0, 100)}`);
+      }
+    }
 
-    // Check of we direct op Allucare/idfed terecht zijn gekomen
-    if (scUrl.includes('allucare') || scUrl.includes('idfed')) {
-      warrantyPage = stellaCarePage;
-      console.log('[Warranty] Direct doorgestuurd naar Allucare/idfed');
-    } else {
-      // We zijn op een Servicebox tussenpagina. Zoek "klik hier" link.
-      console.log('[Warranty] Op Servicebox tussenpagina, zoek "klik hier" link...');
-      await stellaCarePage.waitForTimeout(3000);
+    // Wacht op resultaat — goTo kan een frame navigeren of een popup openen
+    await page.waitForTimeout(5000);
 
-      // Log de pagina-inhoud voor debug
-      const scContent = await stellaCarePage.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
-      console.log(`[Warranty] StellaCare pagina inhoud: ${scContent.substring(0, 300)}`);
+    // Log frame status na goTo
+    const framesAfterGoTo = page.frames().map(f => f.url().substring(0, 100));
+    console.log(`[Warranty] Frames na goTo (${framesAfterGoTo.length}): ${framesAfterGoTo.join(' | ')}`);
 
-      // Zoek "klik hier" link op de pagina en in frames
-      let kliklinkHref = null;
-      const pagesToSearch = [stellaCarePage, ...stellaCarePage.frames()];
-      for (const searchTarget of pagesToSearch) {
+    // Check 1: Is er een popup geopend? (context.on('page') handler)
+    if (warrantyPage) {
+      const wpUrl = warrantyPage.url();
+      console.log(`[Warranty] Popup geopend: ${wpUrl.substring(0, 120)}`);
+
+      // Als de popup de Servicebox tussenpagina is (niet Allucare), zoek "klik hier" link
+      if (!wpUrl.includes('allucare') && !wpUrl.includes('idfed')) {
+        console.log('[Warranty] Popup is tussenpagina, zoek "klik hier" link...');
+        await warrantyPage.waitForTimeout(3000);
+        const kliklinkHref = await findKlikHierLink(warrantyPage);
+        if (kliklinkHref) {
+          console.log(`[Warranty] "Klik hier" link in popup: ${kliklinkHref.substring(0, 120)}`);
+          try {
+            await warrantyPage.goto(kliklinkHref, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          } catch (e) {
+            console.log(`[Warranty] Navigatie timeout (gaat door): ${e.message.substring(0, 100)}`);
+          }
+          console.log(`[Warranty] Popup nu op: ${warrantyPage.url().substring(0, 120)}`);
+        }
+      }
+    }
+
+    // Check 2: Zoek in alle frames van het frameset naar StellaCare content
+    if (!warrantyPage || warrantyPage.url().includes('servicebox')) {
+      console.log('[Warranty] Zoek StellaCare/Allucare in frameset frames...');
+      for (const frame of page.frames()) {
         try {
-          kliklinkHref = await searchTarget.evaluate(() => {
-            const links = document.querySelectorAll('a');
-            for (const link of links) {
-              const text = (link.textContent || '').toLowerCase();
-              const href = link.href || link.getAttribute('href') || '';
-              if ((text.includes('klik hier') || text.includes('click here') || text.includes('cliquez ici')) && href) {
-                return href;
+          const frameUrl = frame.url();
+          if (frameUrl.includes('stellaCare') || frameUrl.includes('allucare') || frameUrl.includes('idfed')) {
+            console.log(`[Warranty] Relevante frame gevonden: ${frameUrl.substring(0, 120)}`);
+
+            // Direct Allucare? Dan gebruiken we de frame content
+            if (frameUrl.includes('allucare') || frameUrl.includes('idfed')) {
+              // We kunnen geen frame als warrantyPage gebruiken, maar we onthouden de URL
+              console.log('[Warranty] Allucare/idfed frame — open als nieuwe pagina');
+              const allucPage = await context.newPage();
+              try {
+                await allucPage.goto(frameUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              } catch (e) {
+                console.log(`[Warranty] Allucare navigatie timeout: ${e.message.substring(0, 100)}`);
               }
-              // Zoek ook links die naar allucare/stellacare verwijzen
-              if (href.includes('allucare') || href.includes('idfed')) {
-                return href;
-              }
+              warrantyPage = allucPage;
+              break;
             }
-            return null;
-          });
-          if (kliklinkHref) break;
+
+            // StellaCare tussenpagina in frame — zoek "klik hier" link
+            const kliklinkHref = await findKlikHierLinkInFrame(frame);
+            if (kliklinkHref) {
+              console.log(`[Warranty] "Klik hier" link in frame: ${kliklinkHref.substring(0, 120)}`);
+              const allucPage = await context.newPage();
+              try {
+                await allucPage.goto(kliklinkHref, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              } catch (e) {
+                console.log(`[Warranty] Klik-hier navigatie timeout: ${e.message.substring(0, 100)}`);
+              }
+              warrantyPage = allucPage;
+              break;
+            }
+          }
+        } catch (e) { continue; }
+      }
+    }
+
+    // Check 3: Zoek in ALLE frames (ook die zonder stellaCare in URL) naar "klik hier"
+    if (!warrantyPage || warrantyPage.url().includes('servicebox')) {
+      console.log('[Warranty] Brede search: zoek "klik hier" in alle frames...');
+      for (const frame of page.frames()) {
+        try {
+          const kliklinkHref = await findKlikHierLinkInFrame(frame);
+          if (kliklinkHref) {
+            console.log(`[Warranty] "Klik hier" link gevonden in frame ${frame.url().substring(0, 80)}: ${kliklinkHref.substring(0, 120)}`);
+            const allucPage = await context.newPage();
+            try {
+              await allucPage.goto(kliklinkHref, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            } catch (e) {
+              console.log(`[Warranty] Klik-hier navigatie timeout: ${e.message.substring(0, 100)}`);
+            }
+            warrantyPage = allucPage;
+            break;
+          }
+        } catch (e) { continue; }
+      }
+    }
+
+    // Check 4: Zoek in alle open pagina's (context.pages()) naar Allucare
+    if (!warrantyPage || warrantyPage.url().includes('servicebox')) {
+      console.log('[Warranty] Check alle open tabs...');
+      for (const p of context.pages()) {
+        const pUrl = p.url();
+        if (pUrl.includes('allucare') || pUrl.includes('idfed')) {
+          warrantyPage = p;
+          console.log(`[Warranty] Allucare tab gevonden: ${pUrl.substring(0, 120)}`);
+          break;
+        }
+      }
+    }
+
+    // Check 5: Als goTo niet werkt, probeer direct frame navigatie
+    if (!warrantyPage || warrantyPage.url().includes('servicebox')) {
+      console.log('[Warranty] goTo werkte niet, probeer directe frame navigatie...');
+      // Dump alle frame content voor debug
+      for (const frame of page.frames()) {
+        try {
+          const fContent = await frame.evaluate(() => document.body?.innerText?.substring(0, 200) || '');
+          console.log(`[Warranty]   Frame ${frame.url().substring(0, 60)}: "${fContent.substring(0, 100)}"`);
         } catch (e) { continue; }
       }
 
-      if (kliklinkHref) {
-        console.log(`[Warranty] "Klik hier" link gevonden: ${kliklinkHref.substring(0, 120)}`);
-        // Navigeer de stellaCarePage naar de link (in plaats van window.open)
+      // Probeer via de content frame de /stellaCare/ URL direct te openen
+      for (const frame of page.frames()) {
         try {
-          await stellaCarePage.goto(kliklinkHref, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          warrantyPage = stellaCarePage;
-          console.log(`[Warranty] Genavigeerd naar: ${warrantyPage.url().substring(0, 120)}`);
-        } catch (e) {
-          console.log(`[Warranty] Navigatie naar klik-hier link timeout (gaat door): ${e.message.substring(0, 100)}`);
-          warrantyPage = stellaCarePage;
-        }
-      } else {
-        // Geen "klik hier" link → check of de pagina een foutmelding toont
-        const lowerContent = scContent.toLowerCase();
-        if (lowerContent.includes('niet beschikbaar') || lowerContent.includes('not available') || lowerContent.includes('pas disponible')) {
-          await browser.close();
-          return {
-            status: 'not_eligible',
-            vin,
-            message: `StellaCare niet beschikbaar voor dit voertuig: ${scContent.substring(0, 200)}`,
-            vehicle: vehicleData
-          };
-        }
+          const frameUrl = frame.url();
+          if (frameUrl.includes('loadFrameHub') || frameUrl.includes('hub') || frameUrl.includes('socle')) {
+            console.log(`[Warranty] Content frame gevonden: ${frameUrl.substring(0, 80)}, navigeer naar stellaCare...`);
+            await frame.evaluate(() => { window.location.href = '/stellaCare/'; });
+            await page.waitForTimeout(5000);
 
-        // Check of er toch een Allucare pagina is geopend (via redirect of popup)
-        const allPages = context.pages();
-        for (const p of allPages) {
-          const pUrl = p.url();
-          if (pUrl.includes('allucare') || pUrl.includes('idfed')) {
-            warrantyPage = p;
-            console.log(`[Warranty] Allucare pagina gevonden in open tabs: ${pUrl.substring(0, 120)}`);
+            // Zoek opnieuw naar "klik hier" link
+            for (const f2 of page.frames()) {
+              try {
+                const kliklinkHref = await findKlikHierLinkInFrame(f2);
+                if (kliklinkHref) {
+                  console.log(`[Warranty] "Klik hier" na frame navigatie: ${kliklinkHref.substring(0, 120)}`);
+                  const allucPage = await context.newPage();
+                  await allucPage.goto(kliklinkHref, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                  warrantyPage = allucPage;
+                  break;
+                }
+              } catch (e) { continue; }
+            }
             break;
           }
-        }
-
-        // Als nog steeds niets: gebruik de stellaCarePage zelf
-        if (!warrantyPage) {
-          warrantyPage = stellaCarePage;
-          console.log(`[Warranty] Geen Allucare link gevonden, gebruik huidige pagina: ${scUrl.substring(0, 120)}`);
-        }
+        } catch (e) { continue; }
       }
     }
 
-    if (!warrantyPage || warrantyPage.url() === 'about:blank') {
+    // Niet-beschikbaar check op frameset pagina als we geen Allucare gevonden hebben
+    if (!warrantyPage || warrantyPage.url().includes('servicebox')) {
+      // Dump frame content voor diagnostiek
+      let combinedContent = '';
+      for (const frame of page.frames()) {
+        try {
+          const fc = await frame.evaluate(() => document.body?.innerText || '');
+          combinedContent += fc + ' ';
+        } catch (e) { continue; }
+      }
+      const lowerContent = combinedContent.toLowerCase();
+      if (lowerContent.includes('niet beschikbaar') || lowerContent.includes('not available') || lowerContent.includes('pas disponible') || lowerContent.includes('niet in aanmerking')) {
+        await browser.close();
+        return {
+          status: 'not_eligible', vin,
+          message: `StellaCare niet beschikbaar: ${combinedContent.substring(0, 200).trim()}`,
+          vehicle: vehicleData
+        };
+      }
+    }
+
+    if (!warrantyPage || warrantyPage.url() === 'about:blank' || warrantyPage.url().includes('servicebox.mpsa.com/stellaCare/#')) {
+      // Dump diagnostiek
+      console.log('[Warranty] FOUT: Geen Allucare formulier gevonden');
+      console.log(`[Warranty] warrantyPage URL: ${warrantyPage ? warrantyPage.url() : 'null'}`);
+      const openPages = context.pages().map(p => p.url().substring(0, 100));
+      console.log(`[Warranty] Open paginas: ${openPages.join(' | ')}`);
+      const frameUrls = page.frames().map(f => f.url().substring(0, 100));
+      console.log(`[Warranty] Frameset frames: ${frameUrls.join(' | ')}`);
       await browser.close();
-      return { status: 'error', vin, message: 'Formulier kon niet geopend worden — geen Allucare pagina gevonden', vehicle: vehicleData };
+      return { status: 'error', vin, message: 'Formulier kon niet geopend worden — geen Allucare pagina gevonden na goTo("/stellaCare/")', vehicle: vehicleData };
     }
 
     console.log(`[Warranty] Formulier pagina: ${warrantyPage.url()}`);
