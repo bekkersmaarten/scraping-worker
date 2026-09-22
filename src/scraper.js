@@ -2950,21 +2950,24 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
             }
           } catch (e) { /* skip */ }
         }
-        console.log(`[Warranty] ${emptyInputs.length} lege zichtbare enabled velden gevonden`);
+        console.log(`[Warranty] ${emptyInputs.length} lege zichtbare enabled velden gevonden (km=${kmFilled}, email=${emailFilled})`);
 
-        if (!kmFilled && emptyInputs.length >= 1) {
+        // Dynamische index: als km al gevuld is, is het eerste lege veld het email-veld
+        let nextIdx = 0;
+        if (!kmFilled && emptyInputs.length > nextIdx) {
           try {
-            await emptyInputs[0].fill(String(kmStand));
+            await emptyInputs[nextIdx].fill(String(kmStand));
             kmFilled = true;
             console.log('[Warranty] Kilometerstand ingevuld in eerste lege veld');
-          } catch (e) { console.log(`[Warranty] Eerste veld fill fout: ${e.message.substring(0, 100)}`); }
+            nextIdx++;
+          } catch (e) { console.log(`[Warranty] Veld ${nextIdx} fill fout: ${e.message.substring(0, 100)}`); nextIdx++; }
         }
-        if (!emailFilled && emptyInputs.length >= 2) {
+        if (!emailFilled && emptyInputs.length > nextIdx) {
           try {
-            await emptyInputs[1].fill(customerEmail);
+            await emptyInputs[nextIdx].fill(customerEmail);
             emailFilled = true;
-            console.log('[Warranty] E-mailadres ingevuld in tweede lege veld');
-          } catch (e) { console.log(`[Warranty] Tweede veld fill fout: ${e.message.substring(0, 100)}`); }
+            console.log('[Warranty] E-mailadres ingevuld in lege veld op positie ' + nextIdx);
+          } catch (e) { console.log(`[Warranty] Veld ${nextIdx} fill fout: ${e.message.substring(0, 100)}`); }
         }
       }
     }
