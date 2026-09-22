@@ -2248,51 +2248,109 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     console.log('[Warranty] StellaCare navigatie gestart, wachten op resultaat...');
 
     // STAP 4: Wacht op het warranty formulier (nieuw venster of navigatie)
+    // Na de StellaCare navigatie zijn er twee mogelijkheden:
+    //   A) Direct doorgestuurd naar Allucare/idfed (warrantyPage URL bevat allucare/idfed)
+    //   B) Tussenpagina in Servicebox met "klik hier" link naar Allucare
+    // De context.on('page') handler vangt nieuwe vensters op, maar dat kan de
+    // tussenpagina zijn. We moeten checken of het het echte formulier is.
     console.log('[Warranty] Wachten op formulier...');
     await page.waitForTimeout(5000);
 
-    // Als er geen nieuw venster is geopend, check of de pagina een melding toont
-    if (!warrantyPage) {
-      // Check of er een nieuw venster verschenen is
+    // Zoek het Allucare/idfed venster in alle open pagina's
+    const findAllucarePage = () => {
       const allPages = context.pages();
       for (const p of allPages) {
         const url = p.url();
-        if (url.includes('allucare') || url.includes('stellacare') || url.includes('idfed')) {
-          warrantyPage = p;
-          break;
+        if (url.includes('allucare') || url.includes('idfed')) {
+          return p;
         }
       }
+      return null;
+    };
+
+    // Check of warrantyPage het echte Allucare formulier is of een Servicebox tussenpagina
+    const allucarePage = findAllucarePage();
+    if (allucarePage) {
+      warrantyPage = allucarePage;
+      console.log(`[Warranty] Allucare pagina direct gevonden: ${warrantyPage.url().substring(0, 100)}`);
     }
 
-    // Als er een "klik hier" link verscheen (zoals in het screenshot)
-    if (!warrantyPage) {
-      for (const frame of page.frames()) {
+    // Helper: zoek en klik "klik hier" link op een pagina/frame
+    const findAndClickKlikHier = async (searchPage) => {
+      const pagesToSearch = [searchPage];
+      // Zoek ook in frames van de pagina
+      if (searchPage.frames) {
+        pagesToSearch.push(...searchPage.frames());
+      }
+      for (const frameOrPage of pagesToSearch) {
         try {
-          const kliklinkClicked = await frame.evaluate(() => {
+          const kliklinkHref = await frameOrPage.evaluate(() => {
             const links = document.querySelectorAll('a');
             for (const link of links) {
               const text = (link.textContent || '').toLowerCase();
-              if (text.includes('klik hier') && link.href) {
-                window.open(link.href, '_blank');
+              if ((text.includes('klik hier') || text.includes('click here') || text.includes('cliquez ici')) && link.href) {
                 return link.href;
               }
             }
             return null;
           });
-          if (kliklinkClicked) {
-            console.log(`[Warranty] "Klik hier" link gevonden: ${kliklinkClicked.substring(0, 100)}`);
-            await page.waitForTimeout(3000);
-            const allPages = context.pages();
-            warrantyPage = allPages[allPages.length - 1];
-            break;
+          if (kliklinkHref) {
+            return kliklinkHref;
           }
         } catch (e) { continue; }
+      }
+      return null;
+    };
+
+    // Als warrantyPage een Servicebox tussenpagina is (niet Allucare/idfed), zoek "klik hier"
+    if (warrantyPage && !warrantyPage.url().includes('allucare') && !warrantyPage.url().includes('idfed')) {
+      console.log(`[Warranty] warrantyPage is Servicebox tussenpagina: ${warrantyPage.url().substring(0, 100)}`);
+      await warrantyPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+      await warrantyPage.waitForTimeout(2000);
+
+      const kliklinkHref = await findAndClickKlikHier(warrantyPage);
+      if (kliklinkHref) {
+        console.log(`[Warranty] "Klik hier" link gevonden op tussenpagina: ${kliklinkHref.substring(0, 100)}`);
+        // Open de link in een nieuw venster
+        await warrantyPage.evaluate((href) => { window.open(href, '_blank'); }, kliklinkHref);
+        await warrantyPage.waitForTimeout(3000);
+        // Zoek opnieuw naar de Allucare pagina
+        const newAllucarePage = findAllucarePage();
+        if (newAllucarePage) {
+          warrantyPage = newAllucarePage;
+          console.log(`[Warranty] Allucare pagina geopend: ${warrantyPage.url().substring(0, 100)}`);
+        } else {
+          // Pak het laatste geopende venster
+          const allPages = context.pages();
+          warrantyPage = allPages[allPages.length - 1];
+          console.log(`[Warranty] Laatste venster als warrantyPage: ${warrantyPage.url().substring(0, 100)}`);
+        }
+      }
+    }
+
+    // Als warrantyPage nog steeds niet gevonden of niet Allucare, zoek "klik hier" op de originele pagina
+    if (!warrantyPage || (warrantyPage.url() === 'about:blank') ||
+        (!warrantyPage.url().includes('allucare') && !warrantyPage.url().includes('idfed') && !warrantyPage.url().includes('stellacare'))) {
+      console.log('[Warranty] Geen Allucare pagina, zoek "klik hier" op originele pagina...');
+      const kliklinkHref = await findAndClickKlikHier(page);
+      if (kliklinkHref) {
+        console.log(`[Warranty] "Klik hier" link gevonden op originele pagina: ${kliklinkHref.substring(0, 100)}`);
+        await page.evaluate((href) => { window.open(href, '_blank'); }, kliklinkHref);
+        await page.waitForTimeout(3000);
+        const newAllucarePage = findAllucarePage();
+        if (newAllucarePage) {
+          warrantyPage = newAllucarePage;
+        } else {
+          const allPages = context.pages();
+          warrantyPage = allPages[allPages.length - 1];
+        }
+        console.log(`[Warranty] warrantyPage na klik hier: ${warrantyPage?.url()?.substring(0, 100)}`);
       }
     }
 
     if (!warrantyPage || warrantyPage.url() === 'about:blank') {
       await browser.close();
-      return { status: 'error', vin, message: 'Formulier kon niet geopend worden na klik op 8-icoon', vehicle: vehicleData };
+      return { status: 'error', vin, message: 'Formulier kon niet geopend worden — geen Allucare pagina gevonden', vehicle: vehicleData };
     }
 
     console.log(`[Warranty] Formulier pagina: ${warrantyPage.url()}`);
