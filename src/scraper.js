@@ -2136,130 +2136,116 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     const vehicleData = await searchAndExtractVehicle(page, vin);
     console.log(`[Warranty] Voertuig gevonden: ${JSON.stringify(vehicleData)}`);
 
-    // STAP 3: Detecteer het StellaCare / Peugeot Care "8" pictogram
-    // HTML structuur in Servicebox:
-    //   <li id="ico-hub-stellaCare-grey" class="stellaCare-icons" style="display: none|list-item">
-    //   <li id="ico-hub-stellaCare-green" class="stellaCare-icons" style="display: none|list-item">
-    //     <a href="javascript:goTo('/stellaCare/')">
-    //       <img src="/static/8.6.2/images/stellaCare-green-icon.png" title="PEUGEOT CARE">
-    //     </a>
-    //   </li>
-    // Groen + display:list-item = klikbaar, kan geactiveerd worden
-    // Grijs + display:list-item = ander land, niet klikbaar
-    // Beide display:none = niet in aanmerking
+    // STAP 3: Navigeer naar StellaCare pagina
+    // Oude aanpak: check display van #ico-hub-stellaCare-green/grey iconen.
+    // PROBLEEM: de frameset bypass (loadFrameHub + _self) zorgt ervoor dat de JS die
+    // de iconen toggelt vaak niet draait → "hidden" → false negative.
+    // NIEUWE AANPAK: navigeer direct naar /stellaCare/ via goTo() (zelfde patroon als
+    // Menu Pricing en ESA). Als het voertuig niet in aanmerking komt, toont de
+    // StellaCare pagina dat zelf — we hoeven niet op icoon-state te vertrouwen.
 
-    let iconFound = false;
-    let iconStatus = 'not_found'; // not_found, grey, green
-    let iconFrame = null;
+    console.log('[Warranty] STAP 3 — Navigeer naar StellaCare (directe navigatie)...');
 
+    // Optionele snelle check: als grijs icoon WEL zichtbaar is, is het ander land
+    let greyIconVisible = false;
     for (const frame of page.frames()) {
       try {
-        const iconInfo = await frame.evaluate(() => {
-          // Zoek de exacte StellaCare icoon-elementen
-          const greenLi = document.getElementById('ico-hub-stellaCare-green');
+        greyIconVisible = await frame.evaluate(() => {
           const greyLi = document.getElementById('ico-hub-stellaCare-grey');
-
-          if (!greenLi && !greyLi) {
-            return { found: false, reason: 'geen stellaCare elementen in dit frame' };
-          }
-
-          // Check display style om te bepalen welke zichtbaar is
-          const greenDisplay = greenLi ? window.getComputedStyle(greenLi).display : 'none';
-          const greyDisplay = greyLi ? window.getComputedStyle(greyLi).display : 'none';
-          const greenVisible = greenDisplay !== 'none';
-          const greyVisible = greyDisplay !== 'none';
-
-          console.log(`StellaCare: green=${greenDisplay}, grey=${greyDisplay}`);
-
-          if (greenVisible) {
-            // Groen icoon zichtbaar → kan geactiveerd worden
-            const link = greenLi.querySelector('a');
-            const img = greenLi.querySelector('img');
-            return {
-              found: true,
-              status: 'green',
-              href: link?.getAttribute('href') || '',
-              imgSrc: img?.getAttribute('src') || '',
-              title: img?.getAttribute('title') || '',
-              outerHTML: greenLi.outerHTML?.substring(0, 500)
-            };
-          } else if (greyVisible) {
-            // Grijs icoon zichtbaar → ander land
-            return {
-              found: true,
-              status: 'grey',
-              outerHTML: greyLi.outerHTML?.substring(0, 500)
-            };
-          } else {
-            // Beide aanwezig maar verborgen → niet in aanmerking
-            return {
-              found: true,
-              status: 'hidden',
-              greenDisplay,
-              greyDisplay
-            };
-          }
+          if (!greyLi) return false;
+          return window.getComputedStyle(greyLi).display !== 'none';
         });
+        if (greyIconVisible) {
+          console.log('[Warranty] Grijs icoon zichtbaar → ander land, maar proberen we toch via directe navigatie');
+          break;
+        }
+      } catch (e) { continue; }
+    }
 
-        if (iconInfo.found) {
-          iconFound = true;
-          iconStatus = iconInfo.status;
-          iconFrame = frame;
-
-          console.log(`[Warranty] StellaCare icoon gevonden: status=${iconInfo.status}`);
-          if (iconInfo.outerHTML) console.log(`[Warranty] HTML: ${iconInfo.outerHTML}`);
-          if (iconInfo.title) console.log(`[Warranty] Title: ${iconInfo.title}`);
-
-          if (iconStatus === 'grey') {
-            await browser.close();
-            return {
-              status: 'other_country',
-              vin,
-              message: 'Voertuig gekoppeld aan ander land (grijs icoon) — activatie niet mogelijk vanuit NL',
-              vehicle: vehicleData
-            };
-          }
-
-          if (iconStatus === 'hidden') {
-            await browser.close();
-            return {
-              status: 'not_eligible',
-              vin,
-              message: 'StellaCare iconen aanwezig maar verborgen — voertuig komt niet in aanmerking',
-              vehicle: vehicleData
-            };
-          }
-
-          // GROEN → klik op het icoon
-          if (iconStatus === 'green') {
-            console.log(`[Warranty] Groen icoon, navigeren naar StellaCare...`);
-            // De link is javascript:goTo('/stellaCare/') — dit navigeert binnen het frame
-            // We moeten het klikken via het frame
-            await frame.evaluate(() => {
-              const link = document.querySelector('#ico-hub-stellaCare-green a');
-              if (link) link.click();
-            });
-            console.log('[Warranty] StellaCare link aangeklikt');
-          }
-
+    // Methode 1: goTo('/stellaCare/') via frame JS context (zelfde als Menu Pricing)
+    let stellaCareNavigated = false;
+    for (const frame of page.frames()) {
+      try {
+        const hasGoTo = await frame.evaluate(() => typeof goTo === 'function');
+        if (hasGoTo) {
+          console.log(`[Warranty] goTo('/stellaCare/') uitvoeren in frame: ${frame.url().substring(0, 80)}`);
+          await frame.evaluate(() => goTo('/stellaCare/'));
+          stellaCareNavigated = true;
           break;
         }
       } catch (e) {
-        // Frame niet bereikbaar, ga door naar volgende
+        console.log(`[Warranty] Frame goTo error: ${e.message.substring(0, 100)}`);
         continue;
       }
     }
 
-    if (!iconFound) {
-      console.log('[Warranty] Geen StellaCare elementen gevonden in enig frame');
+    // Methode 2: Klik de groene of grijze StellaCare link als goTo niet beschikbaar
+    if (!stellaCareNavigated) {
+      console.log('[Warranty] goTo() niet beschikbaar, zoeken naar StellaCare link...');
+      for (const frame of page.frames()) {
+        try {
+          const clicked = await frame.evaluate(() => {
+            // Probeer de groene link
+            const greenLink = document.querySelector('#ico-hub-stellaCare-green a');
+            if (greenLink) { greenLink.click(); return 'green'; }
+            // Probeer alle links met stellaCare in href/onclick
+            const allLinks = document.querySelectorAll('a');
+            for (const link of allLinks) {
+              const href = link.getAttribute('href') || '';
+              const onclick = link.getAttribute('onclick') || '';
+              if (href.includes('stellaCare') || onclick.includes('stellaCare')) {
+                link.click();
+                return 'link';
+              }
+            }
+            return null;
+          });
+          if (clicked) {
+            console.log(`[Warranty] StellaCare link aangeklikt via: ${clicked}`);
+            stellaCareNavigated = true;
+            break;
+          }
+        } catch (e) { continue; }
+      }
+    }
+
+    // Methode 3: Navigeer direct naar /stellaCare/ URL
+    if (!stellaCareNavigated) {
+      console.log('[Warranty] Geen goTo of link gevonden, directe navigatie naar /stellaCare/...');
+      try {
+        // Open in een nieuw venster zodat de context behouden blijft
+        await page.evaluate(() => {
+          window.open('/stellaCare/', '_blank');
+        });
+        stellaCareNavigated = true;
+        console.log('[Warranty] /stellaCare/ geopend via window.open');
+      } catch (e) {
+        console.log(`[Warranty] window.open mislukt: ${e.message.substring(0, 100)}`);
+        // Laatste poging: directe navigatie in context
+        try {
+          const scPage = await context.newPage();
+          await scPage.goto(`${SERVICEBOX_URL}/stellaCare/`, { waitUntil: 'networkidle', timeout: 15000 });
+          warrantyPage = scPage;
+          stellaCareNavigated = true;
+          console.log('[Warranty] /stellaCare/ geopend via directe navigatie');
+        } catch (e2) {
+          console.log(`[Warranty] Directe /stellaCare/ navigatie mislukt: ${e2.message.substring(0, 100)}`);
+        }
+      }
+    }
+
+    if (!stellaCareNavigated) {
+      console.log('[Warranty] Kon StellaCare pagina niet openen via geen enkele methode');
       await browser.close();
       return {
         status: 'not_eligible',
         vin,
-        message: 'Geen 2+6 garantie-icoon gevonden — voertuig komt niet in aanmerking',
+        message: 'Kon StellaCare pagina niet openen — voertuig komt mogelijk niet in aanmerking',
         vehicle: vehicleData
       };
     }
+
+    console.log('[Warranty] StellaCare navigatie gestart, wachten op resultaat...');
 
     // STAP 4: Wacht op het warranty formulier (nieuw venster of navigatie)
     console.log('[Warranty] Wachten op formulier...');
