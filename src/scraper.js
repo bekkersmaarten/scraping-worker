@@ -3862,6 +3862,51 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
           }
         }
 
+        // Check of het formulier gereset is (velden leeg = success)
+        const formReset = await formPage.evaluate(() => {
+          const kmInput = document.querySelector('[formControlName="vehicleMileage"], [formcontrolname="vehicleMileage"]');
+          const emailInput = document.querySelector('[formControlName="customerEmail"], [formcontrolname="customerEmail"]');
+          return {
+            kmEmpty: !kmInput?.value || kmInput.value === '',
+            emailEmpty: !emailInput?.value || emailInput.value === '',
+            isPristine: document.querySelector('form')?.classList.contains('ng-pristine') || false
+          };
+        }).catch(() => ({}));
+        console.log(`[Warranty] Form reset check: ${JSON.stringify(formReset)}`);
+
+        if (formReset.kmEmpty && formReset.emailEmpty && formReset.isPristine) {
+          console.log(`[Warranty] Formulier gereset na submit — waarschijnlijk succesvol`);
+          submitResult = {
+            status: 'activated',
+            message: '2+6 garantie waarschijnlijk succesvol geactiveerd (formulier gereset)',
+            result_text: resultText2.substring(0, 500)
+          };
+          break;
+        }
+
+        // Check of Indieningsgeschiedenis tab actief is (= submit verwerkt)
+        const historyTabActive = await formPage.evaluate(() => {
+          const tabs = document.querySelectorAll('[role="tab"], .mat-tab-label, a[class*="tab"]');
+          for (const tab of tabs) {
+            const txt = tab.textContent?.trim()?.toLowerCase() || '';
+            if ((txt.includes('geschiedenis') || txt.includes('history') || txt.includes('historique')) &&
+                (tab.classList.contains('mat-tab-label-active') || tab.classList.contains('active') || tab.getAttribute('aria-selected') === 'true')) {
+              return true;
+            }
+          }
+          return false;
+        }).catch(() => false);
+
+        if (historyTabActive) {
+          console.log(`[Warranty] Indieningsgeschiedenis tab actief — submit verwerkt`);
+          submitResult = {
+            status: 'activated',
+            message: '2+6 garantie succesvol geactiveerd (tab gewisseld naar geschiedenis)',
+            result_text: resultText2.substring(0, 500)
+          };
+          break;
+        }
+
         // Geen duidelijk resultaat na extra wacht — ga door met volgende poging
         if (attempt < MAX_SUBMIT_ATTEMPTS) {
           console.log('[Warranty] Geen duidelijk resultaat, probeer opnieuw...');
@@ -3892,11 +3937,27 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
         continue;
       }
 
-      // Laatste poging zonder resultaat
+      // Laatste poging zonder resultaat — voeg pagina-inhoud toe voor diagnose
+      const finalPageText = await warrantyPage.evaluate(() => document.body?.innerText || '').catch(() => '');
+      const finalOverlay = await warrantyPage.evaluate(() => {
+        const overlay = document.querySelector('.cdk-overlay-container');
+        return overlay?.textContent?.trim() || '';
+      }).catch(() => '');
+      const finalUrl = await warrantyPage.evaluate(() => window.location.href).catch(() => '');
+      console.log(`[Warranty] Geen resultaat na ${MAX_SUBMIT_ATTEMPTS} pogingen. URL: ${finalUrl}`);
+      console.log(`[Warranty] Pagina tekst: ${finalPageText.substring(0, 1000)}`);
+      console.log(`[Warranty] Overlay: ${finalOverlay.substring(0, 300)}`);
+
+      // Check of het formulier nog steeds zichtbaar is (= submit niet verwerkt)
+      // of dat de pagina veranderd is (= mogelijk wel verwerkt)
+      const formStillVisible = await formPage.$('form.allucare-form-main').catch(() => null);
+
       submitResult = {
         status: 'error',
-        message: 'Geen bevestiging van contract aangemaakt gevonden',
-        result_text: resultText.substring(0, 500)
+        message: `Geen bevestiging gevonden na ${MAX_SUBMIT_ATTEMPTS} pogingen. Pagina: ${finalPageText.substring(0, 200)}`,
+        result_text: finalPageText.substring(0, 500),
+        overlay_text: finalOverlay.substring(0, 200),
+        form_still_visible: !!formStillVisible
       };
     }
 
