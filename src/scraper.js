@@ -2591,6 +2591,77 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       return { status: 'already_activated', vin, message: '2+6 garantie is al eerder geactiveerd voor dit voertuig', vehicle: vehicleData };
     }
 
+    // ══════════════════════════════════════════════════════════════
+    // CONTRACT TYPE VALIDATIE: Check of dit daadwerkelijk een 2+6 garantie is
+    // Het Allucare portaal toont ook Assistance- en Batterij-contracten.
+    // We mogen ALLEEN het 2+6 garantie formulier invullen.
+    // ══════════════════════════════════════════════════════════════
+    const contractTypeInfo = await warrantyPage.evaluate(() => {
+      const body = document.body?.innerText || '';
+      const html = document.body?.innerHTML || '';
+
+      // Zoek alle tab-labels, headings, en contract-type indicatoren
+      const tabs = Array.from(document.querySelectorAll('.mat-tab-label, [role="tab"], .mat-mdc-tab, mat-tab-header .mat-tab-label-content'))
+        .map(el => el.textContent?.trim()).filter(Boolean);
+      const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, .mat-card-title, .card-title, .header-title'))
+        .map(el => el.textContent?.trim()).filter(Boolean);
+
+      // Zoek ook naar contract type labels in formulier secties
+      const allLabels = Array.from(document.querySelectorAll('label, .mat-form-field-label, .in-column-label, [class*="label"], [class*="title"], [class*="header"]'))
+        .map(el => el.textContent?.trim()).filter(Boolean);
+
+      return {
+        bodyFirst1000: body.substring(0, 1000),
+        tabs,
+        headings,
+        labelSample: allLabels.slice(0, 30),
+        url: window.location.href
+      };
+    });
+
+    console.log(`[Warranty] CONTRACT TYPE CHECK:`);
+    console.log(`[Warranty]   Tabs: ${JSON.stringify(contractTypeInfo.tabs)}`);
+    console.log(`[Warranty]   Headings: ${JSON.stringify(contractTypeInfo.headings)}`);
+    console.log(`[Warranty]   Labels (eerste 30): ${JSON.stringify(contractTypeInfo.labelSample)}`);
+    console.log(`[Warranty]   Body (eerste 1000): ${contractTypeInfo.bodyFirst1000}`);
+
+    // Combineer alle tekst voor contract type detectie
+    const allContractText = [
+      ...contractTypeInfo.tabs,
+      ...contractTypeInfo.headings,
+      ...contractTypeInfo.labelSample,
+      contractTypeInfo.bodyFirst1000
+    ].join(' ').toLowerCase();
+
+    // 2+6 garantie keywords — als één van deze aanwezig is, is het een 2+6 contract
+    const is2plus6 = /2\s*\+\s*6|2\s*plus\s*6|extension\s*(de\s*)?garant|verlengde\s*garant|garantie-?uitbreiding|extended\s*warrant/i.test(allContractText);
+
+    // Niet-2+6 contracten — specifieke contracttypes die NIET 2+6 zijn
+    const isAssistance = /assistance\s*(bij\s*)?(onderhoud|maintenance)|assistance\s*nl|assistance\s*contract/i.test(allContractText);
+    const isBatteryHealth = /état\s*de\s*santé|state\s*of\s*health|batterie|battery|soh\b/i.test(allContractText);
+    const isMaintenanceOnly = /onderhoud\s*nl[- ]?basis|maintenance\s*(contract|plan)\b/i.test(allContractText) && !is2plus6;
+
+    console.log(`[Warranty] Contract type: is2plus6=${is2plus6}, isAssistance=${isAssistance}, isBatteryHealth=${isBatteryHealth}, isMaintenanceOnly=${isMaintenanceOnly}`);
+
+    // Als het GEEN 2+6 contract is, maar wél een ander type → niet eligible
+    if (!is2plus6 && (isAssistance || isBatteryHealth || isMaintenanceOnly)) {
+      const detectedType = isAssistance ? 'Assistance' : isBatteryHealth ? 'Battery/État de santé' : 'Onderhoud NL-Basis';
+      console.log(`[Warranty] STOP: Dit is een ${detectedType} contract, GEEN 2+6 garantie`);
+      await browser.close();
+      return {
+        status: 'not_eligible', vin,
+        message: `Geen 2+6 garantie beschikbaar — Allucare toont: ${detectedType}`,
+        vehicle: vehicleData
+      };
+    }
+
+    // Als we geen 2+6 keywords vinden EN ook geen ander type herkennen → extra voorzichtig
+    // Log uitgebreid en ga door (het kan een nieuw/onbekend formulier-layout zijn)
+    if (!is2plus6 && !isAssistance && !isBatteryHealth && !isMaintenanceOnly) {
+      console.log(`[Warranty] WAARSCHUWING: Geen specifiek contracttype herkend. Ga voorzichtig door...`);
+      console.log(`[Warranty] Alle tekst voor detectie: ${allContractText.substring(0, 500)}`);
+    }
+
     // Debug: dump alle formulier-elementen op de pagina
     const formDebug = await warrantyPage.evaluate(() => {
       const inputs = Array.from(document.querySelectorAll('input, textarea, select')).map(el => ({
