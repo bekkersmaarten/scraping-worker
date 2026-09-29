@@ -2188,6 +2188,80 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     console.log(`[Warranty] Frameset URL: ${framesetUrl}`);
     console.log(`[Warranty] Frames (${allFrameUrls.length}): ${allFrameUrls.join(' | ')}`);
 
+    // ══════════════════════════════════════════════════════════════
+    // STAP 3a: StellaCare ICOON CHECK — eligibility bepalen vóór navigatie
+    // Het frameset toont twee iconen:
+    //   #ico-hub-stellaCare-green (display:list-item = eligible)
+    //   #ico-hub-stellaCare-grey  (display:list-item = ander land)
+    //   Beide display:none = niet in aanmerking
+    // We checken dit NA het laden van het volledige frameset, zodat de JS
+    // die de iconen toggelt heeft gedraaid.
+    // ══════════════════════════════════════════════════════════════
+    let iconStatus = 'not_found';
+    for (const frame of page.frames()) {
+      try {
+        const iconInfo = await frame.evaluate(() => {
+          const greenLi = document.getElementById('ico-hub-stellaCare-green');
+          const greyLi = document.getElementById('ico-hub-stellaCare-grey');
+
+          if (!greenLi && !greyLi) return null; // niet in dit frame
+
+          const greenDisplay = greenLi ? window.getComputedStyle(greenLi).display : 'none';
+          const greyDisplay = greyLi ? window.getComputedStyle(greyLi).display : 'none';
+          const greenVisible = greenDisplay !== 'none';
+          const greyVisible = greyDisplay !== 'none';
+
+          return {
+            greenVisible, greyVisible, greenDisplay, greyDisplay,
+            greenHTML: greenLi?.outerHTML?.substring(0, 300) || '',
+            greyHTML: greyLi?.outerHTML?.substring(0, 300) || ''
+          };
+        });
+
+        if (iconInfo) {
+          console.log(`[Warranty] StellaCare iconen: green=${iconInfo.greenDisplay}, grey=${iconInfo.greyDisplay}`);
+
+          if (iconInfo.greenVisible) {
+            iconStatus = 'green';
+            console.log('[Warranty] ✓ Groen icoon zichtbaar — voertuig is eligible voor 2+6');
+          } else if (iconInfo.greyVisible) {
+            iconStatus = 'grey';
+            console.log('[Warranty] ✗ Grijs icoon zichtbaar — ander land / import auto');
+          } else {
+            iconStatus = 'hidden';
+            console.log('[Warranty] ✗ Beide iconen verborgen — niet in aanmerking');
+          }
+          break;
+        }
+      } catch (e) { continue; }
+    }
+
+    console.log(`[Warranty] Icoon status: ${iconStatus}`);
+
+    if (iconStatus === 'grey') {
+      await browser.close();
+      return {
+        status: 'other_country', vin,
+        message: 'Voertuig gekoppeld aan ander land (grijs icoon) — 2+6 activatie niet mogelijk vanuit NL',
+        vehicle: vehicleData
+      };
+    }
+
+    if (iconStatus === 'hidden') {
+      await browser.close();
+      return {
+        status: 'not_eligible', vin,
+        message: 'StellaCare iconen verborgen — voertuig komt niet in aanmerking voor 2+6',
+        vehicle: vehicleData
+      };
+    }
+
+    if (iconStatus === 'not_found') {
+      // Iconen niet gevonden — kan frameset probleem zijn, ga voorzichtig door
+      // De contract type check verderop vangt het alsnog af
+      console.log('[Warranty] WAARSCHUWING: Geen StellaCare iconen gevonden in frameset — ga door met navigatie');
+    }
+
     // Zoek goTo() functie in alle frames en voer uit
     let goToSuccess = false;
     for (const frame of page.frames()) {
