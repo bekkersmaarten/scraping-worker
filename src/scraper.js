@@ -4141,6 +4141,133 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       };
     }
 
+    // ══════════════════════════════════════════════════════════════
+    // STAP 10: Verificatie via Indieningsgeschiedenis tab
+    // Na submit controleert de scraper of de indiening daadwerkelijk
+    // in de geschiedenis-tab staat. Zonder dit kan de form "succesvol"
+    // lijken maar geen contract aanmaken.
+    // ══════════════════════════════════════════════════════════════
+    if (submitResult && submitResult.status === 'activated') {
+      console.log('[Warranty] ═══ STAP 10: Verificatie via Indieningsgeschiedenis tab ═══');
+
+      try {
+        // Klik op de Indieningsgeschiedenis tab
+        let historyTabClicked = false;
+        for (const searchPage of [formPage, warrantyPage]) {
+          try {
+            // Methode 1: Zoek tab via role="tab" met tekst
+            const tabClicked = await searchPage.evaluate(() => {
+              const tabs = document.querySelectorAll('[role="tab"], .mat-tab-label, .mat-mdc-tab');
+              for (const tab of tabs) {
+                const txt = tab.textContent?.trim()?.toLowerCase() || '';
+                if (txt.includes('geschiedenis') || txt.includes('history') || txt.includes('historique')) {
+                  tab.click();
+                  return true;
+                }
+              }
+              return false;
+            });
+            if (tabClicked) {
+              historyTabClicked = true;
+              console.log('[Warranty] Indieningsgeschiedenis tab aangeklikt');
+              break;
+            }
+          } catch (e) { /* probeer volgende page */ }
+        }
+
+        // Methode 2: Playwright locator
+        if (!historyTabClicked) {
+          for (const searchPage of [formPage, warrantyPage]) {
+            try {
+              const loc = searchPage.locator('[role="tab"]:has-text("geschiedenis"), [role="tab"]:has-text("history"), [role="tab"]:has-text("historique")').first();
+              if (await loc.count() > 0) {
+                await loc.click();
+                historyTabClicked = true;
+                console.log('[Warranty] Indieningsgeschiedenis tab aangeklikt via locator');
+                break;
+              }
+            } catch (e) { /* probeer volgende */ }
+          }
+        }
+
+        if (!historyTabClicked) {
+          console.log('[Warranty] WAARSCHUWING: Indieningsgeschiedenis tab niet gevonden — kan niet verifiëren');
+          // Voeg waarschuwing toe maar behoud activated status
+          submitResult.message += ' (verificatie tab niet gevonden)';
+          submitResult.verification = 'tab_not_found';
+        } else {
+          // Wacht op tab-inhoud laden
+          await warrantyPage.waitForTimeout(3000);
+          await warrantyPage.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+          await warrantyPage.waitForTimeout(2000);
+
+          // Lees de inhoud van de tab
+          const historyContent = await (formPage || warrantyPage).evaluate(() => {
+            // Zoek in het tabpanel dat actief is
+            const activePanel = document.querySelector('[role="tabpanel"]:not([hidden]), .mat-tab-body-active, .mat-mdc-tab-body-active');
+            if (activePanel) return activePanel.innerText || '';
+            // Fallback: pak de hele pagina
+            return document.body?.innerText || '';
+          }).catch(() => '');
+
+          console.log(`[Warranty] Indieningsgeschiedenis inhoud: ${historyContent.substring(0, 500)}`);
+
+          // Check voor vandaag's datum in de geschiedenis
+          const today = new Date();
+          const dd = String(today.getDate()).padStart(2, '0');
+          const mm = String(today.getMonth() + 1).padStart(2, '0');
+          const yyyy = today.getFullYear();
+          // Formaten: 30/09/2026, 2026-09-30, 30-09-2026
+          const datePatterns = [
+            `${dd}/${mm}/${yyyy}`,
+            `${yyyy}-${mm}-${dd}`,
+            `${dd}-${mm}-${yyyy}`,
+            `${dd}.${mm}.${yyyy}`
+          ];
+
+          const hasRecentEntry = datePatterns.some(d => historyContent.includes(d));
+          const hasContract = /huidig contract|current contract|contrat actuel|contract|garantie/i.test(historyContent);
+          const hasKm = /kilometerstand|kilométrage|mileage/i.test(historyContent);
+
+          console.log(`[Warranty] Verificatie — datum gevonden: ${hasRecentEntry}, contract: ${hasContract}, km: ${hasKm}`);
+
+          if (hasRecentEntry && (hasContract || hasKm)) {
+            console.log(`[Warranty] ✓ GEVERIFIEERD: Indiening staat in Indieningsgeschiedenis`);
+            submitResult.verification = 'verified';
+            submitResult.message = '2+6 garantie succesvol geactiveerd en geverifieerd in Indieningsgeschiedenis';
+          } else if (hasRecentEntry) {
+            console.log(`[Warranty] ✓ Datum gevonden in geschiedenis — waarschijnlijk OK`);
+            submitResult.verification = 'date_found';
+            submitResult.message = '2+6 garantie succesvol geactiveerd (datum gevonden in geschiedenis)';
+          } else {
+            // Geen entry gevonden — dit is het probleem dat de user rapporteerde
+            console.log(`[Warranty] ✗ GEEN entry gevonden in Indieningsgeschiedenis!`);
+            console.log(`[Warranty] De submit leek succesvol maar de indiening staat NIET in de geschiedenis.`);
+            console.log(`[Warranty] History tab inhoud: "${historyContent.substring(0, 300)}"`);
+
+            // Check of de tab überhaupt content heeft (kan leeg zijn)
+            const tabIsEmpty = !historyContent.trim() || historyContent.trim().length < 20;
+            if (tabIsEmpty) {
+              console.log('[Warranty] Indieningsgeschiedenis tab is leeg — indiening NIET geslaagd');
+            }
+
+            // Overschrijf het "activated" resultaat — het is NIET echt gelukt
+            submitResult = {
+              status: 'error',
+              message: `Formulier leek ingediend maar indiening staat niet in Indieningsgeschiedenis. Tab inhoud: ${historyContent.substring(0, 200) || '(leeg)'}`,
+              verification: 'not_found_in_history',
+              result_text: historyContent.substring(0, 500)
+            };
+          }
+        }
+      } catch (verifyError) {
+        console.error(`[Warranty] Verificatie fout: ${verifyError.message}`);
+        // Bij fout in verificatie: behoud het submit resultaat maar markeer als niet-geverifieerd
+        submitResult.verification = 'error';
+        submitResult.verification_error = verifyError.message;
+      }
+    }
+
     // Return het resultaat
     await browser.close();
     return {
