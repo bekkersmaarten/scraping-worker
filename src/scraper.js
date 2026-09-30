@@ -3112,46 +3112,86 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       console.log(`[Warranty] Fallback: email = eerste niet-km veld (INPUT[${emailField?.index}])`);
     }
 
-    // Stap 4: Invullen
-    if (kmField) {
+    // Stap 4: Invullen — gebruik ECHTE toetsaanslagen (click + type + tab)
+    // Playwright .fill() triggert niet altijd Angular's change detection correct.
+    // Echte keyboard input (click → selectAll → type → tab) werkt wél, net als handmatig.
+    //
+    // Helper: vul een Angular Material input in met echte toetsaanslagen
+    async function fillAngularInput(fieldHandle, value, fieldName, pageContext) {
       try {
-        await kmField.handle.fill(String(kmStand));
-        kmFilled = true;
-        console.log(`[Warranty] Kilometerstand ingevuld: ${kmStand}`);
+        // Stap 1: Klik op het veld om te focussen
+        await fieldHandle.click();
+        await pageContext.waitForTimeout(200);
+
+        // Stap 2: Selecteer alles en verwijder (Ctrl+A, Backspace)
+        await pageContext.keyboard.press('Control+a');
+        await pageContext.waitForTimeout(100);
+        await pageContext.keyboard.press('Backspace');
+        await pageContext.waitForTimeout(100);
+
+        // Stap 3: Type de waarde karakter voor karakter (met korte delay)
+        await pageContext.keyboard.type(String(value), { delay: 30 });
+        await pageContext.waitForTimeout(200);
+
+        // Stap 4: Dispatch extra events die Angular nodig heeft
+        await fieldHandle.evaluate((el) => {
+          // Angular luistert op 'input' event voor reactive forms
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        });
+
+        // Stap 5: Tab naar volgend veld (triggert blur + Angular validation)
+        await pageContext.keyboard.press('Tab');
+        await pageContext.waitForTimeout(300);
+
+        console.log(`[Warranty] ${fieldName} ingevuld via keyboard: "${value}"`);
+        return true;
       } catch (e) {
-        console.log(`[Warranty] Km fill FOUT: ${e.message.substring(0, 150)}`);
-        // Fallback: probeer via evaluate
+        console.log(`[Warranty] ${fieldName} keyboard fill FOUT: ${e.message.substring(0, 150)}`);
+
+        // Fallback 1: Playwright .fill()
         try {
-          await kmField.handle.evaluate((el, val) => {
-            el.value = val;
+          await fieldHandle.fill(String(value));
+          // Extra events na fill
+          await fieldHandle.evaluate((el) => {
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
-          }, String(kmStand));
-          kmFilled = true;
-          console.log('[Warranty] Km ingevuld via JS evaluate fallback');
-        } catch (e2) { console.log(`[Warranty] Km JS evaluate ook mislukt: ${e2.message.substring(0, 100)}`); }
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+          });
+          console.log(`[Warranty] ${fieldName} ingevuld via .fill() fallback`);
+          return true;
+        } catch (e2) {
+          console.log(`[Warranty] ${fieldName} .fill() ook mislukt: ${e2.message.substring(0, 100)}`);
+        }
+
+        // Fallback 2: Direct DOM + events
+        try {
+          await fieldHandle.evaluate((el, val) => {
+            // Gebruik Object.getOwnPropertyDescriptor om Angular's setter te triggeren
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            nativeInputValueSetter.call(el, val);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+          }, String(value));
+          console.log(`[Warranty] ${fieldName} ingevuld via native setter fallback`);
+          return true;
+        } catch (e3) {
+          console.log(`[Warranty] ${fieldName} alle methodes mislukt: ${e3.message.substring(0, 100)}`);
+          return false;
+        }
       }
+    }
+
+    if (kmField) {
+      kmFilled = await fillAngularInput(kmField.handle, String(kmStand), 'Kilometerstand', formPage);
     } else {
       console.log('[Warranty] GEEN km veld gevonden!');
     }
 
     if (emailField) {
-      try {
-        await emailField.handle.fill(customerEmail);
-        emailFilled = true;
-        console.log(`[Warranty] Email ingevuld: ${customerEmail}`);
-      } catch (e) {
-        console.log(`[Warranty] Email fill FOUT: ${e.message.substring(0, 150)}`);
-        try {
-          await emailField.handle.evaluate((el, val) => {
-            el.value = val;
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-          }, customerEmail);
-          emailFilled = true;
-          console.log('[Warranty] Email ingevuld via JS evaluate fallback');
-        } catch (e2) { console.log(`[Warranty] Email JS evaluate ook mislukt: ${e2.message.substring(0, 100)}`); }
-      }
+      emailFilled = await fillAngularInput(emailField.handle, customerEmail, 'Email', formPage);
     } else {
       console.log('[Warranty] GEEN email veld gevonden!');
     }
@@ -3231,11 +3271,42 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     const syncResult = await formPage.evaluate((args) => {
       const { km, email } = args;
       try {
-        if (typeof ng === 'undefined') return 'ng niet beschikbaar';
+        // METHODE 0 (production-safe): Forceer events op alle zichtbare input velden
+        // Dit triggert Angular's ControlValueAccessor listeners ongeacht build mode
+        const forceAngularSync = () => {
+          const results = [];
+          const inputs = document.querySelectorAll('form input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
+          inputs.forEach(el => {
+            if (el.offsetParent === null || el.disabled || el.readOnly) return;
+            if (el.value) {
+              // Gebruik de native value setter om Angular's listener te triggeren
+              const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+              if (nativeSetter && nativeSetter.set) {
+                nativeSetter.set.call(el, el.value);
+              }
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              el.dispatchEvent(new Event('blur', { bubbles: true }));
+              // Focus + blur cycle voor Angular OnBlur update strategy
+              el.focus();
+              el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+              el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+              el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+              el.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+              results.push(`${el.name || el.id || 'input'}=${el.value.substring(0, 20)}`);
+            }
+          });
+          return results;
+        };
+        const evtResults = forceAngularSync();
+        const evtMsg = evtResults.length > 0 ? `Events geforceerd op: ${evtResults.join(', ')}` : 'Geen velden om te syncen';
+
+        // METHODE 1 (dev mode only): ng.getComponent API
+        if (typeof ng === 'undefined') return `${evtMsg} | ng niet beschikbaar (production mode — events zijn de primaire sync methode)`;
         const formEl = document.querySelector('form');
-        if (!formEl) return 'geen form';
+        if (!formEl) return `${evtMsg} | geen form`;
         const comp = ng.getComponent(formEl) || ng.getOwningComponent(formEl);
-        if (!comp) return 'geen component';
+        if (!comp) return `${evtMsg} | geen component`;
 
         let formGroup = null;
         for (const key of Object.keys(comp)) {
@@ -3822,8 +3893,59 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
         break;
       }
 
-      // Klik submit
-      await submitBtn.click();
+      // ── STAP 9a: Forceer Angular FormControl sync vóór submit ──
+      // In production mode is ng.getComponent() niet beschikbaar, maar
+      // __ngContext__ op DOM elementen biedt toegang tot Angular internals.
+      // Als dat ook niet lukt, dispatch we extra events op alle velden.
+      await formPage.evaluate((args) => {
+        const { km, email } = args;
+        try {
+          // Methode 1: Zoek alle inputs en forceer input+change events
+          const inputs = document.querySelectorAll('form input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
+          inputs.forEach(el => {
+            if (el.offsetParent === null || el.disabled || el.readOnly) return;
+            // Forceer Angular value update via native setter + events
+            const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+            if (descriptor && descriptor.set) {
+              if (el.value) {
+                const currentVal = el.value;
+                descriptor.set.call(el, currentVal);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+            }
+          });
+
+          // Methode 2: Zoek form component via __ngContext__ (werkt in production)
+          const formEl = document.querySelector('form');
+          if (formEl) {
+            // Angular ViewEngine: __ngContext__ of ng-reflect-* attributen
+            // Angular Ivy: lView via __ngContext__ index
+            const ctx = formEl['__ngContext__'];
+            if (ctx !== undefined) {
+              console.log('[Warranty] Angular __ngContext__ gevonden op form:', typeof ctx);
+            }
+
+            // Probeer submit handler te vinden en direct aan te roepen
+            // Angular forms luisteren op native 'submit' event
+            const submitEvent = new Event('submit', { bubbles: true, cancelable: true });
+            // We dispatchen dit NIET hier — we laten de button click het doen
+          }
+        } catch (e) {
+          console.log('[Warranty] Pre-submit sync fout (niet-kritiek):', e.message);
+        }
+      }, { km: String(kmStand), email: customerEmail });
+
+      // Klik submit — gebruik meerdere methodes
+      try {
+        await submitBtn.click();
+      } catch (clickErr) {
+        console.log(`[Warranty] Submit click fout, probeer JS click: ${clickErr.message.substring(0, 80)}`);
+        await formPage.evaluate(() => {
+          const btn = document.querySelector('button[type="submit"], button.mat-flat-button[color="primary"]');
+          if (btn) btn.click();
+        });
+      }
       console.log('[Warranty] Indienen geklikt, wachten op resultaat...');
 
       // Wacht op response (snackbar/dialog of pagina-wijziging)
