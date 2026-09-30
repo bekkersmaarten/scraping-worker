@@ -2188,78 +2188,28 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     console.log(`[Warranty] Frameset URL: ${framesetUrl}`);
     console.log(`[Warranty] Frames (${allFrameUrls.length}): ${allFrameUrls.join(' | ')}`);
 
-    // ══════════════════════════════════════════════════════════════
-    // STAP 3a: StellaCare ICOON CHECK — eligibility bepalen vóór navigatie
-    // Het frameset toont twee iconen:
-    //   #ico-hub-stellaCare-green (display:list-item = eligible)
-    //   #ico-hub-stellaCare-grey  (display:list-item = ander land)
-    //   Beide display:none = niet in aanmerking
-    // We checken dit NA het laden van het volledige frameset, zodat de JS
-    // die de iconen toggelt heeft gedraaid.
-    // ══════════════════════════════════════════════════════════════
-    let iconStatus = 'not_found';
+    // NOTE: StellaCare icoon check is NIET betrouwbaar — de frameset bypass
+    // zorgt ervoor dat de JS die iconen toggelt niet draait, waardoor beide
+    // iconen altijd display:none zijn. Eligibility wordt bepaald door de
+    // CONTRACT TYPE CHECK verderop, ná het laden van het Allucare formulier.
+
+    // Log icoon-status puur voor diagnostiek (NIET als filter gebruiken)
     for (const frame of page.frames()) {
       try {
-        const iconInfo = await frame.evaluate(() => {
+        const iconDiag = await frame.evaluate(() => {
           const greenLi = document.getElementById('ico-hub-stellaCare-green');
           const greyLi = document.getElementById('ico-hub-stellaCare-grey');
-
-          if (!greenLi && !greyLi) return null; // niet in dit frame
-
-          const greenDisplay = greenLi ? window.getComputedStyle(greenLi).display : 'none';
-          const greyDisplay = greyLi ? window.getComputedStyle(greyLi).display : 'none';
-          const greenVisible = greenDisplay !== 'none';
-          const greyVisible = greyDisplay !== 'none';
-
+          if (!greenLi && !greyLi) return null;
           return {
-            greenVisible, greyVisible, greenDisplay, greyDisplay,
-            greenHTML: greenLi?.outerHTML?.substring(0, 300) || '',
-            greyHTML: greyLi?.outerHTML?.substring(0, 300) || ''
+            greenDisplay: greenLi ? window.getComputedStyle(greenLi).display : 'n/a',
+            greyDisplay: greyLi ? window.getComputedStyle(greyLi).display : 'n/a'
           };
         });
-
-        if (iconInfo) {
-          console.log(`[Warranty] StellaCare iconen: green=${iconInfo.greenDisplay}, grey=${iconInfo.greyDisplay}`);
-
-          if (iconInfo.greenVisible) {
-            iconStatus = 'green';
-            console.log('[Warranty] ✓ Groen icoon zichtbaar — voertuig is eligible voor 2+6');
-          } else if (iconInfo.greyVisible) {
-            iconStatus = 'grey';
-            console.log('[Warranty] ✗ Grijs icoon zichtbaar — ander land / import auto');
-          } else {
-            iconStatus = 'hidden';
-            console.log('[Warranty] ✗ Beide iconen verborgen — niet in aanmerking');
-          }
+        if (iconDiag) {
+          console.log(`[Warranty] Icoon diagnostiek (INFO ONLY): green=${iconDiag.greenDisplay}, grey=${iconDiag.greyDisplay}`);
           break;
         }
       } catch (e) { continue; }
-    }
-
-    console.log(`[Warranty] Icoon status: ${iconStatus}`);
-
-    if (iconStatus === 'grey') {
-      await browser.close();
-      return {
-        status: 'other_country', vin,
-        message: 'Voertuig gekoppeld aan ander land (grijs icoon) — 2+6 activatie niet mogelijk vanuit NL',
-        vehicle: vehicleData
-      };
-    }
-
-    if (iconStatus === 'hidden') {
-      await browser.close();
-      return {
-        status: 'not_eligible', vin,
-        message: 'StellaCare iconen verborgen — voertuig komt niet in aanmerking voor 2+6',
-        vehicle: vehicleData
-      };
-    }
-
-    if (iconStatus === 'not_found') {
-      // Iconen niet gevonden — kan frameset probleem zijn, ga voorzichtig door
-      // De contract type check verderop vangt het alsnog af
-      console.log('[Warranty] WAARSCHUWING: Geen StellaCare iconen gevonden in frameset — ga door met navigatie');
     }
 
     // Zoek goTo() functie in alle frames en voer uit
@@ -2672,68 +2622,88 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     // ══════════════════════════════════════════════════════════════
     const contractTypeInfo = await warrantyPage.evaluate(() => {
       const body = document.body?.innerText || '';
-      const html = document.body?.innerHTML || '';
 
-      // Zoek alle tab-labels, headings, en contract-type indicatoren
-      const tabs = Array.from(document.querySelectorAll('.mat-tab-label, [role="tab"], .mat-mdc-tab, mat-tab-header .mat-tab-label-content'))
+      // Zoek alle tab-labels
+      const tabs = Array.from(document.querySelectorAll('.mat-tab-label, [role="tab"], .mat-mdc-tab, .mat-tab-label-content, [mat-tab-label]'))
         .map(el => el.textContent?.trim()).filter(Boolean);
-      const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, .mat-card-title, .card-title, .header-title'))
+      // Zoek headings
+      const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, .mat-card-title, .card-title, .header-title, [class*="heading"], [class*="contract"]'))
         .map(el => el.textContent?.trim()).filter(Boolean);
 
-      // Zoek ook naar contract type labels in formulier secties
-      const allLabels = Array.from(document.querySelectorAll('label, .mat-form-field-label, .in-column-label, [class*="label"], [class*="title"], [class*="header"]'))
-        .map(el => el.textContent?.trim()).filter(Boolean);
+      // Zoek ALLE zichtbare tekst-elementen met potentiele contract-indicatoren
+      const allTextElements = Array.from(document.querySelectorAll('span, p, div, label, a, td, th, li, strong, b'))
+        .map(el => {
+          const text = el.textContent?.trim();
+          if (!text || text.length > 200 || text.length < 2) return null;
+          return text;
+        })
+        .filter(Boolean);
+      const uniqueTexts = [...new Set(allTextElements)];
+
+      // Filter teksten relevant voor contract-type
+      const contractRelevant = uniqueTexts.filter(t => {
+        const lower = t.toLowerCase();
+        return lower.includes('2+6') || lower.includes('2 + 6') || lower.includes('extension') ||
+               lower.includes('garantie') || lower.includes('warranty') || lower.includes('assistance') ||
+               lower.includes('onderhoud') || lower.includes('maintenance') || lower.includes('batterie') ||
+               lower.includes('battery') || lower.includes('santé') || lower.includes('contract') ||
+               lower.includes('care') || lower.includes('verlengd');
+      });
 
       return {
-        bodyFirst1000: body.substring(0, 1000),
+        bodyFirst2000: body.substring(0, 2000),
+        bodyLength: body.length,
         tabs,
         headings,
-        labelSample: allLabels.slice(0, 30),
+        contractRelevant,
         url: window.location.href
       };
     });
 
-    console.log(`[Warranty] CONTRACT TYPE CHECK:`);
+    console.log(`[Warranty] === CONTRACT TYPE CHECK ===`);
+    console.log(`[Warranty]   URL: ${contractTypeInfo.url}`);
+    console.log(`[Warranty]   Body length: ${contractTypeInfo.bodyLength}`);
     console.log(`[Warranty]   Tabs: ${JSON.stringify(contractTypeInfo.tabs)}`);
     console.log(`[Warranty]   Headings: ${JSON.stringify(contractTypeInfo.headings)}`);
-    console.log(`[Warranty]   Labels (eerste 30): ${JSON.stringify(contractTypeInfo.labelSample)}`);
-    console.log(`[Warranty]   Body (eerste 1000): ${contractTypeInfo.bodyFirst1000}`);
+    console.log(`[Warranty]   Contract-relevante teksten: ${JSON.stringify(contractTypeInfo.contractRelevant)}`);
+    console.log(`[Warranty]   Body (2000): ${contractTypeInfo.bodyFirst2000}`);
 
-    // Combineer alle tekst voor contract type detectie
     const allContractText = [
       ...contractTypeInfo.tabs,
       ...contractTypeInfo.headings,
-      ...contractTypeInfo.labelSample,
-      contractTypeInfo.bodyFirst1000
+      ...contractTypeInfo.contractRelevant,
+      contractTypeInfo.bodyFirst2000
     ].join(' ').toLowerCase();
 
-    // 2+6 garantie keywords — als één van deze aanwezig is, is het een 2+6 contract
-    const is2plus6 = /2\s*\+\s*6|2\s*plus\s*6|extension\s*(de\s*)?garant|verlengde\s*garant|garantie-?uitbreiding|extended\s*warrant/i.test(allContractText);
+    // Positieve match: 2+6 garantie
+    const is2plus6 = /2\s*\+\s*6|2\s*plus\s*6|extension\s*(de\s*)?garant|verlengde\s*garant|garantie[- ]?uitbreiding|extended\s*warrant/i.test(allContractText);
 
-    // Niet-2+6 contracten — specifieke contracttypes die NIET 2+6 zijn
-    const isAssistance = /assistance\s*(bij\s*)?(onderhoud|maintenance)|assistance\s*nl|assistance\s*contract/i.test(allContractText);
-    const isBatteryHealth = /état\s*de\s*santé|state\s*of\s*health|batterie|battery|soh\b/i.test(allContractText);
-    const isMaintenanceOnly = /onderhoud\s*nl[- ]?basis|maintenance\s*(contract|plan)\b/i.test(allContractText) && !is2plus6;
+    // Negatieve match: bekende niet-2+6 contracttypes
+    const isAssistance = /assistance/i.test(allContractText);
+    const isBatteryHealth = /état\s*de\s*santé|state\s*of\s*health|batterie|battery\s*(health|status)|soh\b/i.test(allContractText);
+    const isMaintenanceContract = /onderhoud\s*(nl|nederland|contract|basis)|maintenance\s*(contract|plan|nl)\b/i.test(allContractText);
 
-    console.log(`[Warranty] Contract type: is2plus6=${is2plus6}, isAssistance=${isAssistance}, isBatteryHealth=${isBatteryHealth}, isMaintenanceOnly=${isMaintenanceOnly}`);
+    console.log(`[Warranty] Detectie: is2plus6=${is2plus6}, isAssistance=${isAssistance}, isBatteryHealth=${isBatteryHealth}, isMaintenance=${isMaintenanceContract}`);
 
-    // Als het GEEN 2+6 contract is, maar wél een ander type → niet eligible
-    if (!is2plus6 && (isAssistance || isBatteryHealth || isMaintenanceOnly)) {
-      const detectedType = isAssistance ? 'Assistance' : isBatteryHealth ? 'Battery/État de santé' : 'Onderhoud NL-Basis';
-      console.log(`[Warranty] STOP: Dit is een ${detectedType} contract, GEEN 2+6 garantie`);
+    if (is2plus6) {
+      console.log('[Warranty] OK: 2+6 garantie contract bevestigd');
+    } else if (isAssistance || isBatteryHealth || isMaintenanceContract) {
+      const detectedTypes = [
+        isAssistance && 'Assistance',
+        isBatteryHealth && 'Battery/Etat de sante',
+        isMaintenanceContract && 'Onderhoud contract'
+      ].filter(Boolean).join(', ');
+      console.log(`[Warranty] STOP: Geen 2+6 maar: ${detectedTypes}`);
       await browser.close();
       return {
         status: 'not_eligible', vin,
-        message: `Geen 2+6 garantie beschikbaar — Allucare toont: ${detectedType}`,
+        message: `Geen 2+6 garantie beschikbaar — Allucare toont: ${detectedTypes}`,
         vehicle: vehicleData
       };
-    }
-
-    // Als we geen 2+6 keywords vinden EN ook geen ander type herkennen → extra voorzichtig
-    // Log uitgebreid en ga door (het kan een nieuw/onbekend formulier-layout zijn)
-    if (!is2plus6 && !isAssistance && !isBatteryHealth && !isMaintenanceOnly) {
-      console.log(`[Warranty] WAARSCHUWING: Geen specifiek contracttype herkend. Ga voorzichtig door...`);
-      console.log(`[Warranty] Alle tekst voor detectie: ${allContractText.substring(0, 500)}`);
+    } else {
+      // Geen 2+6 keywords, geen bekend ander type
+      // Ga door — de uitgebreide logs hierboven laten zien wat er op de pagina staat
+      console.log('[Warranty] WAARSCHUWING: Geen contracttype herkend — ga door (check logs voor diagnose)');
     }
 
     // Debug: dump alle formulier-elementen op de pagina
