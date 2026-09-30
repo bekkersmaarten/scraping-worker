@@ -2168,10 +2168,99 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     const vehicleData = await searchAndExtractVehicle(page, vin);
     console.log(`[Warranty] Voertuig gevonden: ${JSON.stringify(vehicleData)}`);
 
+    // ══════════════════════════════════════════════════════════════
+    // STAP 2b: StellaCare ICOON CHECK — op de vehicle details pagina
+    // Na searchAndExtractVehicle staat de browser op vehicule.do
+    // De iconen hebben SERVER-GERENDERDE inline styles (display: list-item/none).
+    // Dit is het ENIGE betrouwbare moment om ze te checken — later in het frameset
+    // draait de bypass-JS niet en staan ze altijd op display:none.
+    //
+    // Uit de Stellantis documentatie:
+    //   Groen pictogram (display:list-item) = auto komt in aanmerking, klikbaar
+    //   Grijs pictogram (display:list-item) = ander land, niet klikbaar
+    //   Geen pictogram (beide display:none) = auto komt niet in aanmerking
+    // ══════════════════════════════════════════════════════════════
+    console.log('[Warranty] STAP 2b — StellaCare icoon check op vehicle pagina...');
+
+    let iconStatus = 'not_found';
+    // Check in alle frames (de pagina kan frames bevatten na de search)
+    const framesToCheck = [page, ...page.frames()];
+    for (const frameOrPage of framesToCheck) {
+      try {
+        const iconInfo = await frameOrPage.evaluate(() => {
+          const greenLi = document.getElementById('ico-hub-stellaCare-green');
+          const greyLi = document.getElementById('ico-hub-stellaCare-grey');
+
+          if (!greenLi && !greyLi) return null; // niet in dit frame/page
+
+          // Gebruik getAttribute('style') om de server-gerenderde inline style te lezen
+          // Dit is betrouwbaarder dan getComputedStyle die door CSS overschreven kan worden
+          const greenStyle = greenLi?.getAttribute('style') || '';
+          const greyStyle = greyLi?.getAttribute('style') || '';
+
+          // Check ook computed style als fallback
+          const greenComputed = greenLi ? window.getComputedStyle(greenLi).display : 'none';
+          const greyComputed = greyLi ? window.getComputedStyle(greyLi).display : 'none';
+
+          // Groen is zichtbaar als inline style "list-item" bevat OF computed display niet "none" is
+          const greenVisible = greenStyle.includes('list-item') || (greenComputed !== 'none' && !greenStyle.includes('none'));
+          const greyVisible = greyStyle.includes('list-item') || (greyComputed !== 'none' && !greyStyle.includes('none'));
+
+          return {
+            greenVisible, greyVisible,
+            greenStyle, greyStyle,
+            greenComputed, greyComputed,
+            greenTitle: greenLi?.querySelector('img')?.getAttribute('title') || '',
+            greyTitle: greyLi?.querySelector('img')?.getAttribute('title') || ''
+          };
+        });
+
+        if (iconInfo) {
+          console.log(`[Warranty] StellaCare iconen gevonden!`);
+          console.log(`[Warranty]   Green: visible=${iconInfo.greenVisible}, style="${iconInfo.greenStyle}", computed=${iconInfo.greenComputed}, title="${iconInfo.greenTitle}"`);
+          console.log(`[Warranty]   Grey:  visible=${iconInfo.greyVisible}, style="${iconInfo.greyStyle}", computed=${iconInfo.greyComputed}, title="${iconInfo.greyTitle}"`);
+
+          if (iconInfo.greenVisible) {
+            iconStatus = 'green';
+          } else if (iconInfo.greyVisible) {
+            iconStatus = 'grey';
+          } else {
+            iconStatus = 'hidden';
+          }
+          break;
+        }
+      } catch (e) { continue; }
+    }
+
+    console.log(`[Warranty] Icoon status: ${iconStatus}`);
+
+    if (iconStatus === 'grey') {
+      await browser.close();
+      return {
+        status: 'other_country', vin,
+        message: 'Voertuig gekoppeld aan ander land (grijs pictogram) — 2+6 activatie niet mogelijk vanuit NL',
+        vehicle: vehicleData
+      };
+    }
+
+    if (iconStatus === 'hidden') {
+      await browser.close();
+      return {
+        status: 'not_eligible', vin,
+        message: 'Geen 2+6 pictogram beschikbaar — voertuig komt niet in aanmerking',
+        vehicle: vehicleData
+      };
+    }
+
+    if (iconStatus === 'not_found') {
+      // Iconen niet gevonden in pagina — kan layout verandering zijn
+      // Ga door maar log een waarschuwing; contract type check vangt het eventueel af
+      console.log('[Warranty] WAARSCHUWING: StellaCare icoon-elementen niet gevonden op pagina — ga door');
+    }
+
     // STAP 3+4: Navigeer naar StellaCare via het Servicebox frameset
     // De /stellaCare/ URL werkt niet als losse pagina — het moet via het frameset
     // geladen worden met goTo('/stellaCare/') of via de frames.
-    // Het frameset herkent het geselecteerde voertuig via de server-sessie (cookies).
 
     console.log('[Warranty] STAP 3+4 — StellaCare via frameset...');
 
@@ -2186,31 +2275,7 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     const framesetUrl = page.url();
     const allFrameUrls = page.frames().map(f => f.url().substring(0, 100));
     console.log(`[Warranty] Frameset URL: ${framesetUrl}`);
-    console.log(`[Warranty] Frames (${allFrameUrls.length}): ${allFrameUrls.join(' | ')}`);
-
-    // NOTE: StellaCare icoon check is NIET betrouwbaar — de frameset bypass
-    // zorgt ervoor dat de JS die iconen toggelt niet draait, waardoor beide
-    // iconen altijd display:none zijn. Eligibility wordt bepaald door de
-    // CONTRACT TYPE CHECK verderop, ná het laden van het Allucare formulier.
-
-    // Log icoon-status puur voor diagnostiek (NIET als filter gebruiken)
-    for (const frame of page.frames()) {
-      try {
-        const iconDiag = await frame.evaluate(() => {
-          const greenLi = document.getElementById('ico-hub-stellaCare-green');
-          const greyLi = document.getElementById('ico-hub-stellaCare-grey');
-          if (!greenLi && !greyLi) return null;
-          return {
-            greenDisplay: greenLi ? window.getComputedStyle(greenLi).display : 'n/a',
-            greyDisplay: greyLi ? window.getComputedStyle(greyLi).display : 'n/a'
-          };
-        });
-        if (iconDiag) {
-          console.log(`[Warranty] Icoon diagnostiek (INFO ONLY): green=${iconDiag.greenDisplay}, grey=${iconDiag.greyDisplay}`);
-          break;
-        }
-      } catch (e) { continue; }
-    }
+    console.log(`[Warranty] Frames (${allFrameUrls.length}): ${allFrameUrls.join(' | ')}`)
 
     // Zoek goTo() functie in alle frames en voer uit
     let goToSuccess = false;
