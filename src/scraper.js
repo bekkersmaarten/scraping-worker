@@ -2819,9 +2819,10 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     }
 
     // ══════════════════════════════════════════════════════════════
-    // STAP 6: Gebruiksvoorwaarden mat-slide-toggle activeren (MOET EERST)
-    // Sommige formulieren gebruiken mat-slide-toggle, andere gewone checkboxes.
-    // Check eerst of er toggles zijn — zo niet, skip naar STAP 7.
+    // STAP 6: Gebruiksvoorwaarden toggle — LAAT OP "NORMAAL"
+    // Uit manuele tests blijkt dat de toggle NIET aangezet moet worden.
+    // De toggle staat standaard op "Normaal" en moet zo blijven.
+    // "Verzwaard" = zware gebruiksomstandigheden, NIET de gewenste instelling.
     // ══════════════════════════════════════════════════════════════
     const hasAnyToggleElements = await formPage.evaluate(() => {
       return document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle, .mat-mdc-slide-toggle').length > 0;
@@ -2830,12 +2831,14 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       return document.querySelectorAll('input[type="checkbox"]').length > 0;
     });
     console.log(`[Warranty] STAP 6: toggles=${hasAnyToggleElements}, checkboxes=${hasRegularCheckboxes}`);
+    console.log('[Warranty] STAP 6: Gebruiksvoorwaarden toggle NIET aanraken — laat op Normaal');
 
     let gebruiksToggled = false;
 
-    // Als er geen toggles maar wél checkboxes zijn, skip STAP 6 (checkboxes worden in STAP 8 afgehandeld)
+    // SKIP toggle activatie — de toggle moet op Normaal blijven
+    // Checkboxes (bevestigingen) worden in STAP 8 afgehandeld
     if (!hasAnyToggleElements && hasRegularCheckboxes) {
-      console.log('[Warranty] Geen mat-slide-toggle op formulier, checkboxes worden in STAP 8 afgehandeld — skip toggle polling');
+      console.log('[Warranty] Geen mat-slide-toggle op formulier, checkboxes worden in STAP 8 afgehandeld');
     }
 
     // Helper: zoek en klik de toggle in de pagina
@@ -2888,8 +2891,10 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       });
     };
 
-    // Alleen toggle-polling doen als er daadwerkelijk toggle-elementen zijn (of nog geen checkboxes)
-    if (hasAnyToggleElements || !hasRegularCheckboxes) {
+    // STAP 6 toggle-polling UITGESCHAKELD — toggle moet op Normaal blijven
+    // De Gebruiksvoorwaarden toggle (Normaal/Verzwaard) mag NIET aangeraakt worden.
+    // Alleen de bevestigings-checkboxes in STAP 8 moeten aangevinkt worden.
+    if (false) {
       // Poll tot de toggle verschijnt (max 15 seconden, elke 2s)
       const maxToggleAttempts = 8;
       for (let attempt = 1; attempt <= maxToggleAttempts; attempt++) {
@@ -3112,95 +3117,85 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       console.log(`[Warranty] Fallback: email = eerste niet-km veld (INPUT[${emailField?.index}])`);
     }
 
-    // Stap 4: Invullen — gebruik ECHTE toetsaanslagen (click + type + tab)
-    // Playwright .fill() triggert niet altijd Angular's change detection correct.
-    // Echte keyboard input (click → selectAll → type → tab) werkt wél, net als handmatig.
-    //
-    // Helper: vul een Angular Material input in met echte toetsaanslagen
-    async function fillAngularInput(fieldHandle, value, fieldName, pageContext) {
-      try {
-        // Stap 1: Klik op het veld om te focussen
-        await fieldHandle.click();
-        await pageContext.waitForTimeout(200);
-
-        // Stap 2: Selecteer alles en verwijder (Ctrl+A, Backspace)
-        await pageContext.keyboard.press('Control+a');
-        await pageContext.waitForTimeout(100);
-        await pageContext.keyboard.press('Backspace');
-        await pageContext.waitForTimeout(100);
-
-        // Stap 3: Type de waarde karakter voor karakter (met korte delay)
-        await pageContext.keyboard.type(String(value), { delay: 30 });
-        await pageContext.waitForTimeout(200);
-
-        // Stap 4: Dispatch extra events die Angular nodig heeft
-        await fieldHandle.evaluate((el) => {
-          // Angular luistert op 'input' event voor reactive forms
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          el.dispatchEvent(new Event('blur', { bubbles: true }));
-        });
-
-        // Stap 5: Tab naar volgend veld (triggert blur + Angular validation)
-        await pageContext.keyboard.press('Tab');
-        await pageContext.waitForTimeout(300);
-
-        console.log(`[Warranty] ${fieldName} ingevuld via keyboard: "${value}"`);
-        return true;
-      } catch (e) {
-        console.log(`[Warranty] ${fieldName} keyboard fill FOUT: ${e.message.substring(0, 150)}`);
-
-        // Fallback 1: Playwright .fill()
-        try {
-          await fieldHandle.fill(String(value));
-          // Extra events na fill
-          await fieldHandle.evaluate((el) => {
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            el.dispatchEvent(new Event('blur', { bubbles: true }));
-          });
-          console.log(`[Warranty] ${fieldName} ingevuld via .fill() fallback`);
-          return true;
-        } catch (e2) {
-          console.log(`[Warranty] ${fieldName} .fill() ook mislukt: ${e2.message.substring(0, 100)}`);
-        }
-
-        // Fallback 2: Direct DOM + events
-        try {
-          await fieldHandle.evaluate((el, val) => {
-            // Gebruik Object.getOwnPropertyDescriptor om Angular's setter te triggeren
-            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-            nativeInputValueSetter.call(el, val);
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            el.dispatchEvent(new Event('blur', { bubbles: true }));
-          }, String(value));
-          console.log(`[Warranty] ${fieldName} ingevuld via native setter fallback`);
-          return true;
-        } catch (e3) {
-          console.log(`[Warranty] ${fieldName} alle methodes mislukt: ${e3.message.substring(0, 100)}`);
-          return false;
-        }
-      }
-    }
+    // Stap 4: Invullen — SIMPELE AANPAK: click + keyboard type + tab
+    // BELANGRIJK: Gebruik warrantyPage.keyboard (altijd een Page object).
+    // formPage kan een Frame zijn, en Frames hebben GEEN .keyboard property.
+    // Dit is exact wat een gebruiker doet: klik veld → type → tab naar volgend.
 
     if (kmField) {
-      kmFilled = await fillAngularInput(kmField.handle, String(kmStand), 'Kilometerstand', formPage);
+      try {
+        // Klik op het km-veld om te focussen
+        await kmField.handle.click();
+        await warrantyPage.waitForTimeout(300);
+
+        // Selecteer alles + verwijder (voor het geval er al een waarde staat)
+        await warrantyPage.keyboard.press('Control+a');
+        await warrantyPage.waitForTimeout(100);
+        await warrantyPage.keyboard.press('Backspace');
+        await warrantyPage.waitForTimeout(100);
+
+        // Type de kilometerstand karakter voor karakter
+        await warrantyPage.keyboard.type(String(kmStand), { delay: 50 });
+        await warrantyPage.waitForTimeout(300);
+
+        // Tab naar volgend veld (triggert blur + Angular validation)
+        await warrantyPage.keyboard.press('Tab');
+        await warrantyPage.waitForTimeout(500);
+
+        kmFilled = true;
+        console.log(`[Warranty] Kilometerstand ingevuld via keyboard: ${kmStand}`);
+      } catch (e) {
+        console.log(`[Warranty] Km keyboard FOUT: ${e.message.substring(0, 150)}`);
+        // Fallback: .fill()
+        try {
+          await kmField.handle.fill(String(kmStand));
+          kmFilled = true;
+          console.log('[Warranty] Km ingevuld via .fill() fallback');
+        } catch (e2) { console.log(`[Warranty] Km .fill() ook mislukt: ${e2.message.substring(0, 100)}`); }
+      }
     } else {
       console.log('[Warranty] GEEN km veld gevonden!');
     }
 
     if (emailField) {
-      emailFilled = await fillAngularInput(emailField.handle, customerEmail, 'Email', formPage);
+      try {
+        // Klik op het email-veld om te focussen
+        await emailField.handle.click();
+        await warrantyPage.waitForTimeout(300);
+
+        // Selecteer alles + verwijder
+        await warrantyPage.keyboard.press('Control+a');
+        await warrantyPage.waitForTimeout(100);
+        await warrantyPage.keyboard.press('Backspace');
+        await warrantyPage.waitForTimeout(100);
+
+        // Type het e-mailadres karakter voor karakter
+        await warrantyPage.keyboard.type(customerEmail, { delay: 30 });
+        await warrantyPage.waitForTimeout(300);
+
+        // Tab naar volgend veld
+        await warrantyPage.keyboard.press('Tab');
+        await warrantyPage.waitForTimeout(500);
+
+        emailFilled = true;
+        console.log(`[Warranty] Email ingevuld via keyboard: ${customerEmail}`);
+      } catch (e) {
+        console.log(`[Warranty] Email keyboard FOUT: ${e.message.substring(0, 150)}`);
+        // Fallback: .fill()
+        try {
+          await emailField.handle.fill(customerEmail);
+          emailFilled = true;
+          console.log('[Warranty] Email ingevuld via .fill() fallback');
+        } catch (e2) { console.log(`[Warranty] Email .fill() ook mislukt: ${e2.message.substring(0, 100)}`); }
+      }
     } else {
       console.log('[Warranty] GEEN email veld gevonden!');
     }
 
-    // Stap 5: Als een veld nog niet gevuld is, wacht 3s en probeer opnieuw (Angular re-render)
+    // Retry als een veld niet gevuld is
     if (!kmFilled || !emailFilled) {
       console.log(`[Warranty] Retry na 3s wacht (km=${kmFilled}, email=${emailFilled})...`);
-      await formPage.evaluate(() => document.body?.click()).catch(() => {});
-      await formPage.waitForTimeout(3000);
+      await warrantyPage.waitForTimeout(3000);
 
       const retryHandles = await formPage.$$('input');
       for (const handle of retryHandles) {
@@ -3215,20 +3210,21 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
           if (info.disabled || info.readOnly || !info.visible || info.mffDisabled) continue;
           if (['hidden', 'checkbox', 'radio', 'submit', 'button', 'image'].includes(info.type)) continue;
 
-          if (!kmFilled && (info.type === 'number' || (!info.value || info.value.trim() === ''))) {
-            if (info.type === 'number') {
-              await handle.fill(String(kmStand));
-              kmFilled = true;
-              console.log(`[Warranty] Km retry: type=${info.type}, id=${info.id}`);
-              continue;
-            }
+          if (!kmFilled && info.type === 'number') {
+            await handle.click();
+            await warrantyPage.waitForTimeout(200);
+            await warrantyPage.keyboard.type(String(kmStand), { delay: 50 });
+            await warrantyPage.keyboard.press('Tab');
+            kmFilled = true;
+            console.log(`[Warranty] Km retry via keyboard: id=${info.id}`);
           }
-          if (!emailFilled && info.type !== 'number') {
-            if (!info.value || info.value.trim() === '' || info.value.includes('@')) {
-              await handle.fill(customerEmail);
-              emailFilled = true;
-              console.log(`[Warranty] Email retry: type=${info.type}, id=${info.id}`);
-            }
+          if (!emailFilled && info.type !== 'number' && !info.value.includes('@')) {
+            await handle.click();
+            await warrantyPage.waitForTimeout(200);
+            await warrantyPage.keyboard.type(customerEmail, { delay: 30 });
+            await warrantyPage.keyboard.press('Tab');
+            emailFilled = true;
+            console.log(`[Warranty] Email retry via keyboard: id=${info.id}`);
           }
         } catch (e) { continue; }
       }
@@ -3263,135 +3259,34 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     // (STAP 7a date fix verwijderd — startDate/endDate zijn interne Angular controls)
 
     // ══════════════════════════════════════════════════════════════
-    // STAP 7b: Sync DOM-waarden naar Angular FormControls
-    // Playwright .fill() zet de DOM value, maar Angular's reactive form
-    // pakt het niet altijd op. Sync nu via ng API.
+    // STAP 7b: Verificatie dat waarden ingevuld zijn
+    // Met keyboard.type() zou Angular de waarden al moeten hebben,
+    // maar we verifiëren en loggen de status.
     // ══════════════════════════════════════════════════════════════
-    console.log('[Warranty] STAP 7b: Angular FormControl sync na invullen...');
+    console.log('[Warranty] STAP 7b: Verificatie ingevulde waarden...');
     const syncResult = await formPage.evaluate((args) => {
       const { km, email } = args;
       try {
-        // METHODE 0 (production-safe): Forceer events op alle zichtbare input velden
-        // Dit triggert Angular's ControlValueAccessor listeners ongeacht build mode
-        const forceAngularSync = () => {
-          const results = [];
-          const inputs = document.querySelectorAll('form input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
-          inputs.forEach(el => {
-            if (el.offsetParent === null || el.disabled || el.readOnly) return;
-            if (el.value) {
-              // Gebruik de native value setter om Angular's listener te triggeren
-              const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-              if (nativeSetter && nativeSetter.set) {
-                nativeSetter.set.call(el, el.value);
-              }
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-              el.dispatchEvent(new Event('blur', { bubbles: true }));
-              // Focus + blur cycle voor Angular OnBlur update strategy
-              el.focus();
-              el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
-              el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-              el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
-              el.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
-              results.push(`${el.name || el.id || 'input'}=${el.value.substring(0, 20)}`);
-            }
-          });
-          return results;
-        };
-        const evtResults = forceAngularSync();
-        const evtMsg = evtResults.length > 0 ? `Events geforceerd op: ${evtResults.join(', ')}` : 'Geen velden om te syncen';
+        // Verifieer dat de waarden in de DOM staan
+        const inputs = document.querySelectorAll('form input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
+        const fieldValues = [];
+        inputs.forEach(el => {
+          if (el.offsetParent === null || el.disabled || el.readOnly) return;
+          fieldValues.push(`${el.name || el.id || el.type}="${el.value?.substring(0, 30)}"`);
+        });
 
-        // METHODE 1 (dev mode only): ng.getComponent API
-        if (typeof ng === 'undefined') return `${evtMsg} | ng niet beschikbaar (production mode — events zijn de primaire sync methode)`;
-        const formEl = document.querySelector('form');
-        if (!formEl) return `${evtMsg} | geen form`;
-        const comp = ng.getComponent(formEl) || ng.getOwningComponent(formEl);
-        if (!comp) return `${evtMsg} | geen component`;
+        // Probeer ng.getComponent als het beschikbaar is (dev mode)
+        let ngStatus = 'ng niet beschikbaar (production mode)';
+        try {
+          if (typeof ng !== 'undefined') {
+            ngStatus = 'ng beschikbaar';
+          }
+        } catch (e) { /* ignore */ }
 
-        let formGroup = null;
-        for (const key of Object.keys(comp)) {
-          const val = comp[key];
-          if (val && val.controls && typeof val.markAllAsTouched === 'function') {
-            formGroup = val;
-            break;
-          }
-        }
-        if (!formGroup) return 'geen FormGroup';
-
-        // Log alle controls met status
-        const allControls = {};
-        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
-          allControls[name] = { valid: ctrl.valid, value: ctrl.value, type: typeof ctrl.value };
-        }
-
-        const synced = [];
-        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
-          const nameLower = name.toLowerCase();
-          // Sync km
-          if ((nameLower.includes('km') || nameLower.includes('kilo') || nameLower.includes('mileage') || nameLower.includes('mile')) && km) {
-            if (!ctrl.value || ctrl.value === '' || ctrl.value === 0 || ctrl.value === '0') {
-              ctrl.setValue(parseInt(km) || km);
-              ctrl.markAsDirty();
-              ctrl.updateValueAndValidity();
-              synced.push(`${name}=${km}`);
-            }
-          }
-          // Sync email
-          else if ((nameLower.includes('mail') || nameLower.includes('email') || nameLower.includes('courriel')) && email) {
-            if (!ctrl.value || ctrl.value === '') {
-              ctrl.setValue(email);
-              ctrl.markAsDirty();
-              ctrl.updateValueAndValidity();
-              synced.push(`${name}=email`);
-            }
-          }
-          // Sync datumvelden: startDate → vandaag, endDate → vandaag + 2 jaar
-          else if (nameLower === 'startdate' || nameLower === 'start_date' || nameLower === 'datestart' || nameLower === 'begindatum') {
-            if (!ctrl.value || ctrl.value === '' || ctrl.value === null) {
-              const today = new Date();
-              ctrl.setValue(today);
-              ctrl.markAsDirty();
-              ctrl.updateValueAndValidity();
-              synced.push(`${name}=today(${today.toISOString().substring(0, 10)})`);
-            }
-          }
-          else if (nameLower === 'enddate' || nameLower === 'end_date' || nameLower === 'dateend' || nameLower === 'einddatum') {
-            if (!ctrl.value || ctrl.value === '' || ctrl.value === null) {
-              const endDate = new Date();
-              endDate.setFullYear(endDate.getFullYear() + 2);
-              ctrl.setValue(endDate);
-              ctrl.markAsDirty();
-              ctrl.updateValueAndValidity();
-              synced.push(`${name}=today+2y(${endDate.toISOString().substring(0, 10)})`);
-            }
-          }
-        }
-
-        // Sync ALLE lege/ongeldige controls vanuit hun DOM input element
-        for (const [name, ctrl] of Object.entries(formGroup.controls)) {
-          if (!ctrl.valid && (ctrl.value === '' || ctrl.value === null || ctrl.value === undefined)) {
-            const el = document.querySelector(`[formcontrolname="${name}"], #${name}, [name="${name}"]`);
-            if (el && el.value) {
-              ctrl.setValue(el.type === 'number' ? Number(el.value) : el.value);
-              ctrl.markAsDirty();
-              ctrl.updateValueAndValidity();
-              synced.push(`${name}=DOM:${el.value.substring(0, 15)}`);
-            }
-            // Als het een date control is zonder DOM value, zet op vandaag
-            else if (name.toLowerCase().includes('date') || name.toLowerCase().includes('datum')) {
-              const today = new Date();
-              ctrl.setValue(today);
-              ctrl.markAsDirty();
-              ctrl.updateValueAndValidity();
-              synced.push(`${name}=fallback:today`);
-            }
-          }
-        }
-        formGroup.updateValueAndValidity();
-        return `Controls: ${JSON.stringify(allControls)}\nSynced: ${synced.length > 0 ? synced.join(', ') : 'alle controls al in sync'}`;
-      } catch (e) { return `sync error: ${e.message}`; }
+        return `Velden: ${fieldValues.join(', ')} | ${ngStatus}`;
+      } catch (e) { return `verificatie error: ${e.message}`; }
     }, { km: String(kmStand), email: customerEmail });
-    console.log(`[Warranty] FormControl sync: ${syncResult}`);
+    console.log(`[Warranty] Veld verificatie: ${syncResult}`);
 
     // ══════════════════════════════════════════════════════════════
     // STAP 8: ALLE toggles/checkboxes aanvinken (agreement velden)
@@ -3727,108 +3622,16 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     });
     console.log(`[Warranty] ANGULAR FORM DEBUG: ${JSON.stringify(angularDebug)}`);
 
-    // Als er ng-invalid controls zijn, probeer ze te fixen
+    // ng-invalid controls zijn normaal voor Allucare (verborgen date controls)
+    // De ng API werkt niet in production mode, dus we skippen de fix-poging.
+    // De keyboard input zou Angular's change detection direct moeten triggeren.
     if (angularDebug.invalidControls && angularDebug.invalidControls.length > 0) {
-      console.log(`[Warranty] ${angularDebug.invalidControls.length} ongeldige Angular form controls gevonden!`);
-
-      // Probeer Angular form controls programmatisch te zetten via ng API
-      const fixResult = await formPage.evaluate((args) => {
-        const { kmStand, customerEmail } = args;
-        try {
-          if (typeof ng === 'undefined' || !ng.getComponent) return 'ng API niet beschikbaar';
-
-          const formEl = document.querySelector('form');
-          if (!formEl) return 'geen form element';
-
-          const comp = ng.getComponent(formEl) || ng.getOwningComponent(formEl);
-          if (!comp) return 'geen Angular component gevonden';
-
-          // Zoek het FormGroup object
-          let formGroup = null;
-          for (const key of Object.keys(comp)) {
-            const val = comp[key];
-            if (val && val.controls && typeof val.markAllAsTouched === 'function') {
-              formGroup = val;
-              break;
-            }
-          }
-          if (!formGroup) return 'geen FormGroup gevonden';
-
-          // Log alle controls met hun status
-          const status = {};
-          for (const [name, ctrl] of Object.entries(formGroup.controls)) {
-            status[name] = { valid: ctrl.valid, value: ctrl.value, errors: ctrl.errors ? JSON.stringify(ctrl.errors) : null };
-          }
-          const statusStr = JSON.stringify(status);
-
-          const fixed = [];
-          for (const [name, ctrl] of Object.entries(formGroup.controls)) {
-            if (!ctrl.valid) {
-              // Boolean controls (checkboxes/toggles) → zet op true
-              if (ctrl.value === false || ctrl.value === null) {
-                ctrl.setValue(true);
-                ctrl.markAsDirty();
-                ctrl.updateValueAndValidity();
-                fixed.push(`${name}=true`);
-              }
-              // Lege string controls → sync waarde vanuit DOM input
-              else if (ctrl.value === '' || ctrl.value === undefined) {
-                // Probeer het DOM element te vinden en de waarde te synchen
-                const el = document.querySelector(`[formcontrolname="${name}"], #${name}, [name="${name}"]`);
-                if (el && el.value) {
-                  ctrl.setValue(el.value);
-                  ctrl.markAsDirty();
-                  ctrl.updateValueAndValidity();
-                  fixed.push(`${name}=DOM:${el.value.substring(0, 20)}`);
-                } else {
-                  // Probeer km/email/datum op basis van control naam
-                  const nameLower = name.toLowerCase();
-                  if ((nameLower.includes('km') || nameLower.includes('kilo') || nameLower.includes('mileage')) && kmStand) {
-                    ctrl.setValue(String(kmStand));
-                    ctrl.markAsDirty();
-                    ctrl.updateValueAndValidity();
-                    fixed.push(`${name}=km:${kmStand}`);
-                  } else if ((nameLower.includes('mail') || nameLower.includes('email') || nameLower.includes('courriel')) && customerEmail) {
-                    ctrl.setValue(customerEmail);
-                    ctrl.markAsDirty();
-                    ctrl.updateValueAndValidity();
-                    fixed.push(`${name}=email`);
-                  } else if (nameLower.includes('startdate') || nameLower.includes('start_date') || nameLower.includes('begindatum')) {
-                    ctrl.setValue(new Date());
-                    ctrl.markAsDirty();
-                    ctrl.updateValueAndValidity();
-                    fixed.push(`${name}=today`);
-                  } else if (nameLower.includes('enddate') || nameLower.includes('end_date') || nameLower.includes('einddatum')) {
-                    const end = new Date();
-                    end.setFullYear(end.getFullYear() + 2);
-                    ctrl.setValue(end);
-                    ctrl.markAsDirty();
-                    ctrl.updateValueAndValidity();
-                    fixed.push(`${name}=today+2y`);
-                  } else if (nameLower.includes('date') || nameLower.includes('datum')) {
-                    ctrl.setValue(new Date());
-                    ctrl.markAsDirty();
-                    ctrl.updateValueAndValidity();
-                    fixed.push(`${name}=today(fallback)`);
-                  }
-                }
-              }
-              // Numerieke controls met waarde maar validation error → forceer update
-              else if (ctrl.value !== '' && ctrl.value !== null && ctrl.value !== undefined) {
-                ctrl.markAsDirty();
-                ctrl.updateValueAndValidity();
-                fixed.push(`${name}=revalidate`);
-              }
-            }
-          }
-          formGroup.updateValueAndValidity();
-          return `Controls: ${statusStr}\nFixed: ${fixed.length > 0 ? fixed.join(', ') : 'geen fixbare controls'}`;
-        } catch (e) {
-          return `fix error: ${e.message}`;
-        }
-      }, { kmStand: String(kmStand), customerEmail });
-      console.log(`[Warranty] Angular form fix poging: ${fixResult}`);
-      await formPage.waitForTimeout(500);
+      const hiddenInvalids = angularDebug.invalidControls.filter(c => c.hidden);
+      const visibleInvalids = angularDebug.invalidControls.filter(c => !c.hidden);
+      console.log(`[Warranty] ${hiddenInvalids.length} verborgen ng-invalid controls (normaal), ${visibleInvalids.length} zichtbare ng-invalid controls`);
+      if (visibleInvalids.length > 0) {
+        console.log(`[Warranty] WAARSCHUWING: Zichtbare ongeldige velden: ${JSON.stringify(visibleInvalids)}`);
+      }
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -3892,49 +3695,6 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
         submitResult = { status: 'error', message: 'Indienen-knop niet gevonden' };
         break;
       }
-
-      // ── STAP 9a: Forceer Angular FormControl sync vóór submit ──
-      // In production mode is ng.getComponent() niet beschikbaar, maar
-      // __ngContext__ op DOM elementen biedt toegang tot Angular internals.
-      // Als dat ook niet lukt, dispatch we extra events op alle velden.
-      await formPage.evaluate((args) => {
-        const { km, email } = args;
-        try {
-          // Methode 1: Zoek alle inputs en forceer input+change events
-          const inputs = document.querySelectorAll('form input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
-          inputs.forEach(el => {
-            if (el.offsetParent === null || el.disabled || el.readOnly) return;
-            // Forceer Angular value update via native setter + events
-            const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-            if (descriptor && descriptor.set) {
-              if (el.value) {
-                const currentVal = el.value;
-                descriptor.set.call(el, currentVal);
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-              }
-            }
-          });
-
-          // Methode 2: Zoek form component via __ngContext__ (werkt in production)
-          const formEl = document.querySelector('form');
-          if (formEl) {
-            // Angular ViewEngine: __ngContext__ of ng-reflect-* attributen
-            // Angular Ivy: lView via __ngContext__ index
-            const ctx = formEl['__ngContext__'];
-            if (ctx !== undefined) {
-              console.log('[Warranty] Angular __ngContext__ gevonden op form:', typeof ctx);
-            }
-
-            // Probeer submit handler te vinden en direct aan te roepen
-            // Angular forms luisteren op native 'submit' event
-            const submitEvent = new Event('submit', { bubbles: true, cancelable: true });
-            // We dispatchen dit NIET hier — we laten de button click het doen
-          }
-        } catch (e) {
-          console.log('[Warranty] Pre-submit sync fout (niet-kritiek):', e.message);
-        }
-      }, { km: String(kmStand), email: customerEmail });
 
       // Klik submit — gebruik meerdere methodes
       try {
@@ -4018,15 +3778,16 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       const resultText = await warrantyPage.evaluate(() => document.body?.innerText || '');
       console.log(`[Warranty] Resultaat (poging ${attempt}): ${resultText.substring(0, 500)}`);
 
-      // Contract-ID extraheren
+      // Contract-ID extraheren — formaat: VR7CCHPX0ST086348H00 (VIN + suffix)
       let contractId = null;
-      const contractMatch = resultText.match(/contract aangemaakt met ID[:\s]*([A-Z0-9\-]+)/i)
+      const contractMatch = resultText.match(/contract aangemaakt met ID\s+([A-Z0-9]+)/i)
         || resultText.match(/contract[:\s]+ID[:\s]*([A-Z0-9\-]+)/i)
         || resultText.match(/contract(?:\s+is)?\s+(?:aangemaakt|created)[^]*?(?:ID|nummer)[:\s]*([A-Z0-9\-]+)/i);
-      if (contractMatch) contractId = contractMatch[1];
+      if (contractMatch) contractId = contractMatch[1].replace(/\s+/g, '').replace(/\.+$/, '');
 
       // Succes via pagina tekst
-      if (/contract aangemaakt met ID|contract has been created|contract is aangemaakt|succesvol geactiveerd|successfully activated/i.test(resultText)) {
+      // Uit manuele test: "Het formulier is ingediend en er is een contract aangemaakt met ID VR7CCHPX0ST086348H00 . U kunt dit venster nu sluiten."
+      if (/formulier is ingediend|contract aangemaakt met ID|contract has been created|contract is aangemaakt|succesvol geactiveerd|successfully activated/i.test(resultText)) {
         console.log(`[Warranty] 2+6 activatie GELUKT voor ${vin}`);
         submitResult = {
           status: 'activated',
