@@ -3696,6 +3696,63 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
         break;
       }
 
+      // ── DIAGNOSTIEK vóór submit ──
+      // Screenshot + DOM dump + form state om te zien wat de scraper ziet
+      const preSubmitDiag = await formPage.evaluate(() => {
+        const form = document.querySelector('form');
+        const inputs = Array.from(document.querySelectorAll('form input')).map(el => ({
+          type: el.type, name: el.name || el.id, value: el.value?.substring(0, 50),
+          checked: el.checked, disabled: el.disabled, visible: el.offsetParent !== null,
+          ngClasses: Array.from(el.classList).filter(c => c.startsWith('ng-')).join(' ')
+        }));
+        const toggles = Array.from(document.querySelectorAll('mat-slide-toggle')).map(el => ({
+          checked: el.classList.contains('mat-checked') || el.classList.contains('mat-mdc-slide-toggle-checked'),
+          text: el.textContent?.trim()?.substring(0, 60)
+        }));
+        const checkboxes = Array.from(document.querySelectorAll('mat-checkbox')).map(el => ({
+          checked: el.classList.contains('mat-checkbox-checked') || el.classList.contains('mat-mdc-checkbox-checked'),
+          text: el.textContent?.trim()?.substring(0, 80)
+        }));
+        const submitBtnInfo = document.querySelector('button[type="submit"]');
+        return {
+          formClasses: form?.className?.substring(0, 200) || 'NO FORM',
+          inputs, toggles, checkboxes,
+          submitDisabled: submitBtnInfo?.disabled || false,
+          submitText: submitBtnInfo?.textContent?.trim() || '',
+          pageUrl: window.location.href,
+          pageTitle: document.title
+        };
+      }).catch(e => ({ error: e.message }));
+      console.log(`[Warranty] ═══ PRE-SUBMIT DIAGNOSTIEK ═══`);
+      console.log(`[Warranty] URL: ${preSubmitDiag.pageUrl}`);
+      console.log(`[Warranty] Form classes: ${preSubmitDiag.formClasses}`);
+      console.log(`[Warranty] Submit button: "${preSubmitDiag.submitText}", disabled=${preSubmitDiag.submitDisabled}`);
+      console.log(`[Warranty] Inputs: ${JSON.stringify(preSubmitDiag.inputs)}`);
+      console.log(`[Warranty] Toggles: ${JSON.stringify(preSubmitDiag.toggles)}`);
+      console.log(`[Warranty] Checkboxes: ${JSON.stringify(preSubmitDiag.checkboxes)}`);
+
+      // ── Network request logging ──
+      // Luister naar ALLE requests die de pagina maakt na submit
+      const networkRequests = [];
+      const requestHandler = (request) => {
+        const url = request.url();
+        const method = request.method();
+        const postData = request.postData()?.substring(0, 500) || '';
+        if (!url.includes('.js') && !url.includes('.css') && !url.includes('.png') && !url.includes('.jpg') && !url.includes('.woff')) {
+          networkRequests.push({ method, url: url.substring(0, 200), postData });
+          console.log(`[Warranty] NETWORK: ${method} ${url.substring(0, 150)} ${postData ? `BODY: ${postData.substring(0, 200)}` : ''}`);
+        }
+      };
+      const responseHandler = (response) => {
+        const url = response.url();
+        const status = response.status();
+        if (!url.includes('.js') && !url.includes('.css') && !url.includes('.png') && !url.includes('.jpg') && !url.includes('.woff')) {
+          console.log(`[Warranty] RESPONSE: ${status} ${url.substring(0, 150)}`);
+        }
+      };
+      warrantyPage.on('request', requestHandler);
+      warrantyPage.on('response', responseHandler);
+
       // Klik submit — gebruik meerdere methodes
       try {
         await submitBtn.click();
@@ -3709,7 +3766,21 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       console.log('[Warranty] Indienen geklikt, wachten op resultaat...');
 
       // Wacht op response (snackbar/dialog of pagina-wijziging)
-      await warrantyPage.waitForTimeout(5000);
+      await warrantyPage.waitForTimeout(8000);
+
+      // Stop network logging
+      warrantyPage.removeListener('request', requestHandler);
+      warrantyPage.removeListener('response', responseHandler);
+      console.log(`[Warranty] Totaal ${networkRequests.length} network requests na submit`);
+      if (networkRequests.length === 0) {
+        console.log('[Warranty] ⚠ GEEN network requests na submit — form heeft NIET gepost!');
+      }
+
+      // Post-submit pagina staat
+      const postSubmitUrl = await warrantyPage.evaluate(() => window.location.href).catch(() => 'unknown');
+      const postSubmitText = await warrantyPage.evaluate(() => document.body?.innerText?.substring(0, 1000) || '').catch(() => '');
+      console.log(`[Warranty] Post-submit URL: ${postSubmitUrl}`);
+      console.log(`[Warranty] Post-submit tekst: ${postSubmitText.substring(0, 500)}`);
 
       // Check voor overlay/dialog/snackbar
       const overlayText = await warrantyPage.evaluate(() => {
