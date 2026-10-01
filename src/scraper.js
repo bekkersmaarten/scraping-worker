@@ -2265,6 +2265,100 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       console.log('[Warranty] WAARSCHUWING: StellaCare icoon-elementen niet gevonden op pagina — ga door');
     }
 
+    // ══════════════════════════════════════════════════════════════
+    // STAP 2c: PRE-AUTHENTICEER Allucare SSO
+    // Allucare heeft een eigen OAuth2 client_id bij idfed.mpsa.com.
+    // Als we StellaCare openen, opent er een popup met een JWT-token URL.
+    // Zonder bestaande SSO-sessie voor Allucare redirect die popup naar idfed,
+    // en na login komt de redirect terug ZONDER het JWT-token → zoekpagina.
+    // FIX: Open Allucare alvast in een aparte tab, doorloop SSO, sluit tab.
+    // Dan opent de StellaCare popup met het token en SSO passeert direct.
+    // ══════════════════════════════════════════════════════════════
+    console.log('[Warranty] STAP 2c — Pre-authenticatie Allucare SSO...');
+    let preAuthPage = null;
+    try {
+      preAuthPage = await context.newPage();
+      await preAuthPage.goto('https://allucare-dmbr.stellantis.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await preAuthPage.waitForTimeout(3000);
+
+      const preAuthUrl = preAuthPage.url();
+      console.log(`[Warranty] Pre-auth URL: ${preAuthUrl.substring(0, 120)}`);
+
+      // SSO login loop (zelfde logica als STAP 5, maar op de pre-auth tab)
+      for (let ssoAttempt = 0; ssoAttempt < 3; ssoAttempt++) {
+        const curUrl = preAuthPage.url();
+        if (!curUrl.includes('idfed.mpsa.com')) {
+          console.log(`[Warranty] Pre-auth: niet op idfed, SSO al klaar (URL: ${curUrl.substring(0, 80)})`);
+          break;
+        }
+        console.log(`[Warranty] Pre-auth SSO stap ${ssoAttempt + 1}/3`);
+
+        await preAuthPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+
+        // Check password veld (PingFederate stap 2)
+        const pwField = await preAuthPage.$('input[type="password"]');
+        const pwVisible = pwField ? await pwField.isVisible().catch(() => false) : false;
+
+        if (pwVisible) {
+          // Username + password pagina
+          const userField = await preAuthPage.$('#username, input[name="pf.username"]');
+          if (userField) {
+            const curVal = await userField.inputValue().catch(() => '');
+            if (!curVal || curVal.trim() === '') {
+              await userField.evaluate((el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }, USERNAME);
+            }
+          }
+          await pwField.click();
+          await preAuthPage.waitForTimeout(300);
+          await preAuthPage.keyboard.type(PASSWORD, { delay: 50 });
+
+          const submitBtn = await preAuthPage.$('a.ping-button, button[type="submit"], input[type="submit"]');
+          if (submitBtn) await submitBtn.click();
+          else await preAuthPage.keyboard.press('Enter');
+
+          console.log('[Warranty] Pre-auth: credentials ingevoerd, wacht op redirect...');
+          try {
+            await preAuthPage.waitForURL(/allucare|stellantis/i, { timeout: 30000 });
+            console.log(`[Warranty] Pre-auth: redirect geslaagd naar ${preAuthPage.url().substring(0, 80)}`);
+          } catch (e) {
+            console.log(`[Warranty] Pre-auth: redirect timeout, URL: ${preAuthPage.url().substring(0, 80)}`);
+          }
+          break;
+        }
+
+        // Identifier pagina (stap 1)
+        const idField = await preAuthPage.$('#identifierInput, input[name="subject"], input[type="text"]:not([type="hidden"])');
+        if (idField) {
+          const isVis = await idField.isVisible().catch(() => false);
+          if (isVis) {
+            await idField.click();
+            await preAuthPage.waitForTimeout(300);
+            await idField.selectText().catch(() => {});
+            await preAuthPage.keyboard.type(USERNAME, { delay: 50 });
+            const submitBtn = await preAuthPage.$('a.ping-button, button[type="submit"], input[type="submit"]');
+            if (submitBtn) await submitBtn.click();
+            else await preAuthPage.keyboard.press('Enter');
+            console.log('[Warranty] Pre-auth: identifier ingevoerd');
+            await preAuthPage.waitForTimeout(3000);
+            await preAuthPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+            continue;
+          }
+        }
+
+        await preAuthPage.waitForTimeout(3000);
+      }
+
+      console.log(`[Warranty] Pre-auth voltooid, URL: ${preAuthPage.url().substring(0, 80)}`);
+    } catch (e) {
+      console.log(`[Warranty] Pre-auth fout (gaat door): ${e.message.substring(0, 100)}`);
+    }
+
+    // Sluit pre-auth tab
+    if (preAuthPage) {
+      try { await preAuthPage.close(); } catch (e) {}
+      console.log('[Warranty] Pre-auth tab gesloten');
+    }
+
     // STAP 3+4: Navigeer naar StellaCare via het Servicebox frameset
     // De /stellaCare/ URL werkt niet als losse pagina — het moet via het frameset
     // geladen worden met goTo('/stellaCare/') of via de frames.
