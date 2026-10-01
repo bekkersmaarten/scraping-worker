@@ -2153,9 +2153,16 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
 
   // Luister naar nieuwe pagina's (het 2+6 formulier opent in nieuw venster)
   let warrantyPage = null;
+  let originalPopupUrl = null; // Bewaar de originele URL met token vóór SSO redirect
   context.on('page', (newPage) => {
-    console.log(`[Warranty] Nieuw venster geopend: ${newPage.url()}`);
+    const popupUrl = newPage.url();
+    console.log(`[Warranty] Nieuw venster geopend: ${popupUrl}`);
     warrantyPage = newPage;
+    // Sla de originele URL op als die het Allucare token bevat
+    if (popupUrl.includes('allucare') && popupUrl.includes('token=')) {
+      originalPopupUrl = popupUrl;
+      console.log(`[Warranty] Originele token-URL opgeslagen (${popupUrl.length} chars)`);
+    }
   });
 
   const page = await context.newPage();
@@ -2325,6 +2332,11 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
         const kliklinkHref = await findKlikHierLink(warrantyPage);
         if (kliklinkHref) {
           console.log(`[Warranty] "Klik hier" link in popup: ${kliklinkHref.substring(0, 120)}`);
+          // Bewaar als token-URL als het token bevat
+          if (kliklinkHref.includes('allucare') && kliklinkHref.includes('token=')) {
+            originalPopupUrl = kliklinkHref;
+            console.log(`[Warranty] Originele token-URL opgeslagen vanuit klik-hier link`);
+          }
           try {
             await warrantyPage.goto(kliklinkHref, { waitUntil: 'domcontentloaded', timeout: 30000 });
           } catch (e) {
@@ -2570,6 +2582,27 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
           console.log(`[Warranty] Redirect timeout, huidige URL: ${warrantyPage.url()}`);
           await warrantyPage.waitForTimeout(5000);
         }
+
+        // ═══════════════════════════════════════════════════════════
+        // CRUCIAAL: Na SSO login is het JWT-token verloren gegaan!
+        // De SSO redirect_uri is alleen "https://allucare-dmbr.stellantis.com"
+        // zonder de ?Source=Hub&token=eyJ... parameter.
+        // Hierdoor toont Allucare de zoekpagina i.p.v. het warranty formulier.
+        // FIX: Navigeer terug naar de originele URL met het token.
+        // SSO cookies zijn nu gezet, dus de pagina laadt direct zonder redirect.
+        // ═══════════════════════════════════════════════════════════
+        if (originalPopupUrl && !warrantyPage.url().includes('token=')) {
+          console.log('[Warranty] Token verloren na SSO redirect — navigeer terug naar originele URL met token...');
+          try {
+            await warrantyPage.goto(originalPopupUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            console.log(`[Warranty] Token-URL herladen geslaagd: ${warrantyPage.url().substring(0, 120)}`);
+          } catch (e) {
+            console.log(`[Warranty] Token-URL herladen timeout (gaat door): ${e.message.substring(0, 100)}`);
+          }
+          // Wacht even tot Angular bootstrapt
+          await warrantyPage.waitForTimeout(3000);
+        }
+
         break;
       }
 
