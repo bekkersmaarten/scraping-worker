@@ -2259,6 +2259,69 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     }
 
     // ══════════════════════════════════════════════════════════════
+    // STAP 2c: PRE-AUTHENTICEER Allucare SSO
+    // Zonder bestaande SSO-sessie redirect de Allucare server met een 302
+    // VOORDAT Angular laadt. Daardoor gaat het JWT-token verloren en toont
+    // Allucare "VIN is a mandatory field".
+    // FIX: Open Allucare alvast om de SSO-sessie aan te maken.
+    // ══════════════════════════════════════════════════════════════
+    console.log('[Warranty] STAP 2c — Pre-authenticatie Allucare SSO...');
+    try {
+      const preAuthPage = await context.newPage();
+      try {
+        await preAuthPage.goto('https://allucare-dmbr.stellantis.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      } catch (e) {
+        console.log(`[Warranty] Pre-auth navigatie timeout (gaat door)`);
+      }
+      await preAuthPage.waitForTimeout(2000);
+
+      // SSO login loop
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const curUrl = preAuthPage.url();
+        if (!curUrl.includes('idfed.mpsa.com')) {
+          console.log(`[Warranty] Pre-auth: SSO klaar (${curUrl.substring(0, 60)})`);
+          break;
+        }
+        await preAuthPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+
+        const pwField = await preAuthPage.$('input[type="password"]');
+        if (pwField && await pwField.isVisible().catch(() => false)) {
+          const userField = await preAuthPage.$('#username, input[name="pf.username"]');
+          if (userField) {
+            const val = await userField.inputValue().catch(() => '');
+            if (!val.trim()) await userField.evaluate((el, v) => { el.value = v; el.dispatchEvent(new Event('input', {bubbles:true})); }, USERNAME);
+          }
+          await pwField.click();
+          await preAuthPage.keyboard.type(PASSWORD, { delay: 50 });
+          const btn = await preAuthPage.$('a.ping-button, button[type="submit"], input[type="submit"]');
+          if (btn) await btn.click(); else await preAuthPage.keyboard.press('Enter');
+          console.log('[Warranty] Pre-auth: credentials ingevoerd');
+          try { await preAuthPage.waitForURL(/allucare|stellantis/i, { timeout: 30000 }); } catch (e) {}
+          console.log(`[Warranty] Pre-auth: redirect naar ${preAuthPage.url().substring(0, 60)}`);
+          break;
+        }
+
+        const idField = await preAuthPage.$('#identifierInput, input[name="subject"]');
+        if (idField && await idField.isVisible().catch(() => false)) {
+          await idField.click();
+          await idField.selectText().catch(() => {});
+          await preAuthPage.keyboard.type(USERNAME, { delay: 50 });
+          const btn = await preAuthPage.$('a.ping-button, button[type="submit"], input[type="submit"]');
+          if (btn) await btn.click(); else await preAuthPage.keyboard.press('Enter');
+          console.log('[Warranty] Pre-auth: identifier ingevoerd');
+          await preAuthPage.waitForTimeout(3000);
+          continue;
+        }
+        await preAuthPage.waitForTimeout(3000);
+      }
+
+      try { await preAuthPage.close(); } catch (e) {}
+      console.log('[Warranty] Pre-auth tab gesloten — SSO sessie aangemaakt');
+    } catch (e) {
+      console.log(`[Warranty] Pre-auth fout (gaat door): ${e.message.substring(0, 100)}`);
+    }
+
+    // ══════════════════════════════════════════════════════════════
     // STAP 3+4: Navigeer naar StellaCare via het Servicebox frameset
     //
     // Handmatige flow:
@@ -2534,6 +2597,23 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
 
     if (!formRendered) {
       console.log('[Warranty] WAARSCHUWING: Formulier niet gerenderd na 30s');
+
+      // Check of er een foutmelding is ("VIN is a mandatory field") → klik Sluiten
+      const errorDismissed = await warrantyPage.evaluate(() => {
+        const body = document.body?.innerText || '';
+        if (body.includes('VIN is a mandatory field') || body.includes('kritieke fout')) {
+          const closeBtn = document.querySelector('.cancel-btn, button');
+          if (closeBtn && closeBtn.textContent?.includes('Sluiten')) {
+            closeBtn.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (errorDismissed) {
+        console.log('[Warranty] Foutmelding "VIN mandatory" gesloten, wacht op zoekpagina...');
+        await warrantyPage.waitForTimeout(3000);
+      }
 
       // ═══════════════════════════════════════════════════════════
       // STAP 6b: VIN ZOEKEN op de Allucare zoekpagina
