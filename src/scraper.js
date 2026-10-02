@@ -2258,11 +2258,21 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       console.log('[Warranty] WAARSCHUWING: StellaCare icoon-elementen niet gevonden op pagina — ga door');
     }
 
+    // ══════════════════════════════════════════════════════════════
     // STAP 3+4: Navigeer naar StellaCare via het Servicebox frameset
-    // De /stellaCare/ URL werkt niet als losse pagina — het moet via het frameset
-    // geladen worden met goTo('/stellaCare/') of via de frames.
+    //
+    // Handmatige flow:
+    //   1. Klik groen StellaCare icoon → goTo('/stellaCare/?source=ICON')
+    //   2. Popup opent met Allucare URL + JWT token
+    //   3. Als SSO nodig: popup redirect naar idfed → login → terug naar Allucare
+    //   4. Allucare toont het warranty formulier
+    //
+    // We gebruiken goTo('/stellaCare/?source=ICON') — precies wat het groene
+    // icoon doet. De ?source=ICON parameter is essentieel: zonder deze krijg
+    // je mogelijk een ander token of formulier.
+    // ══════════════════════════════════════════════════════════════
 
-    console.log('[Warranty] STAP 3+4 — StellaCare via frameset...');
+    console.log('[Warranty] STAP 3+4 — StellaCare via frameset (source=ICON)...');
 
     // Navigeer terug naar Servicebox frameset
     try {
@@ -2273,110 +2283,49 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     await page.waitForTimeout(3000);
 
     const framesetUrl = page.url();
-    const allFrameUrls = page.frames().map(f => f.url().substring(0, 100));
     console.log(`[Warranty] Frameset URL: ${framesetUrl}`);
-    console.log(`[Warranty] Frames (${allFrameUrls.length}): ${allFrameUrls.join(' | ')}`)
 
-    // Zoek goTo() functie in alle frames en voer uit
+    // Zoek goTo() functie in alle frames en voer uit met ?source=ICON
     let goToSuccess = false;
     for (const frame of page.frames()) {
       try {
         const hasGoTo = await frame.evaluate(() => typeof goTo === 'function');
         if (hasGoTo) {
           console.log(`[Warranty] goTo() gevonden in: ${frame.url().substring(0, 80)}`);
-          await frame.evaluate(() => goTo('/stellaCare/'));
+          await frame.evaluate(() => goTo('/stellaCare/?source=ICON'));
           goToSuccess = true;
-          console.log('[Warranty] goTo("/stellaCare/") uitgevoerd');
-          break;
-        }
-      } catch (e) {
-        // Frame might be cross-origin or detached
-        continue;
-      }
-    }
-
-    // Fallback: probeer goTo vanuit main page
-    if (!goToSuccess) {
-      try {
-        await page.evaluate(() => goTo('/stellaCare/'));
-        goToSuccess = true;
-        console.log('[Warranty] goTo("/stellaCare/") uitgevoerd vanuit main page');
-      } catch (e) {
-        console.log(`[Warranty] goTo() niet beschikbaar: ${e.message.substring(0, 100)}`);
-      }
-    }
-
-    // Wacht op resultaat — goTo navigeert een frame naar de StellaCare tussenpagina
-    // en opent MOGELIJK een popup direct naar Allucare (die we NIET willen gebruiken,
-    // want die gaat door SSO en verliest het JWT token).
-    await page.waitForTimeout(5000);
-
-    // Log frame status na goTo
-    const framesAfterGoTo = page.frames().map(f => f.url().substring(0, 100));
-    console.log(`[Warranty] Frames na goTo (${framesAfterGoTo.length}): ${framesAfterGoTo.join(' | ')}`);
-
-    // Log of er een popup is geopend (voor diagnostiek, we gebruiken die NIET)
-    if (warrantyPage) {
-      console.log(`[Warranty] Popup geopend (wordt GENEGEERD): ${warrantyPage.url().substring(0, 120)}`);
-      // Sluit de Allucare popup — die verliest het token bij SSO redirect
-      try { await warrantyPage.close(); } catch (e) {}
-      warrantyPage = null;
-      console.log('[Warranty] Popup gesloten');
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // CORRECTE FLOW: Zoek "klik hier" link in de frameset tussenpagina
-    // Na goTo('/stellaCare/') staat er een tussenpagina in een frameset-frame
-    // met tekst "De applicatie verschijnt in een nieuw venster" en een
-    // "klik hier" link naar /stellaCare/?source=ICON#
-    // DIE link handelt SSO correct af en leidt naar het warranty formulier.
-    // ═══════════════════════════════════════════════════════════════
-    console.log('[Warranty] Zoek "klik hier" link in frameset frames...');
-    let kliklinkHref = null;
-
-    // Zoek in alle frames naar de "klik hier" link
-    for (const frame of page.frames()) {
-      try {
-        const frameUrl = frame.url();
-        // Dump frame content voor diagnostiek
-        const fContent = await frame.evaluate(() => {
-          const body = document.body?.innerText || '';
-          const links = Array.from(document.querySelectorAll('a')).map(a => ({
-            text: a.textContent?.trim()?.substring(0, 50),
-            href: a.href || a.getAttribute('href') || ''
-          }));
-          return { body: body.substring(0, 200), links };
-        });
-        console.log(`[Warranty] Frame ${frameUrl.substring(0, 60)}: "${fContent.body.substring(0, 100)}" (${fContent.links.length} links)`);
-        fContent.links.forEach(l => console.log(`[Warranty]   Link: "${l.text}" → ${l.href.substring(0, 120)}`));
-
-        // Zoek "klik hier" link
-        const href = await findKlikHierLinkInFrame(frame);
-        if (href) {
-          kliklinkHref = href;
-          console.log(`[Warranty] "Klik hier" link gevonden: ${href.substring(0, 120)}`);
+          console.log('[Warranty] goTo("/stellaCare/?source=ICON") uitgevoerd');
           break;
         }
       } catch (e) { continue; }
     }
 
-    // Fallback: als geen "klik hier" gevonden, probeer directe /stellaCare/ URL
-    if (!kliklinkHref) {
-      console.log('[Warranty] Geen "klik hier" link gevonden, probeer directe URL...');
-      kliklinkHref = `${SERVICEBOX_URL}/stellaCare/?source=ICON#`;
-      console.log(`[Warranty] Fallback URL: ${kliklinkHref}`);
+    if (!goToSuccess) {
+      try {
+        await page.evaluate(() => goTo('/stellaCare/?source=ICON'));
+        goToSuccess = true;
+        console.log('[Warranty] goTo("/stellaCare/?source=ICON") uitgevoerd vanuit main page');
+      } catch (e) {
+        console.log(`[Warranty] goTo() niet beschikbaar: ${e.message.substring(0, 100)}`);
+      }
     }
 
-    // Open de "klik hier" URL in een nieuwe pagina
-    // Dit is het pad dat de gebruiker ook volgt bij handmatig activeren
-    console.log(`[Warranty] Navigeer naar "klik hier" URL: ${kliklinkHref.substring(0, 120)}`);
-    warrantyPage = await context.newPage();
-    try {
-      await warrantyPage.goto(kliklinkHref, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    } catch (e) {
-      console.log(`[Warranty] Navigatie timeout (gaat door): ${e.message.substring(0, 100)}`);
+    // Wacht op popup (Allucare met token of idfed SSO)
+    await page.waitForTimeout(8000);
+
+    if (warrantyPage) {
+      console.log(`[Warranty] Popup geopend: ${warrantyPage.url().substring(0, 120)}`);
+    } else {
+      console.log('[Warranty] Geen popup geopend, zoek in alle tabs...');
+      for (const p of context.pages()) {
+        const pUrl = p.url();
+        if (pUrl.includes('allucare') || pUrl.includes('idfed')) {
+          warrantyPage = p;
+          console.log(`[Warranty] Allucare/idfed tab gevonden: ${pUrl.substring(0, 120)}`);
+          break;
+        }
+      }
     }
-    console.log(`[Warranty] Na navigatie URL: ${warrantyPage.url().substring(0, 120)}`);
 
     // Niet-beschikbaar check op frameset pagina als we geen Allucare gevonden hebben
     if (!warrantyPage || warrantyPage.url().includes('servicebox')) {
