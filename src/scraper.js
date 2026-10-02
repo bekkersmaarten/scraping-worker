@@ -2781,7 +2781,101 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
     }
 
     if (!formRendered) {
-      console.log('[Warranty] WAARSCHUWING: Formulier niet gerenderd na 30s, ga toch door...');
+      console.log('[Warranty] WAARSCHUWING: Formulier niet gerenderd na 30s');
+
+      // ═══════════════════════════════════════════════════════════
+      // STAP 6b: VIN ZOEKEN op de Allucare zoekpagina
+      // Als het warranty formulier niet rendert maar we op de Allucare
+      // zoekpagina staan ("Voer een VIN in."), zoek het voertuig op VIN.
+      // Dan zou het warranty formulier voor dat voertuig moeten verschijnen.
+      // ═══════════════════════════════════════════════════════════
+      const hasVinSearch = await warrantyPage.evaluate(() => {
+        const inputs = Array.from(document.querySelectorAll('input[type="text"]'));
+        return inputs.some(el => el.placeholder?.includes('VIN'));
+      });
+
+      if (hasVinSearch) {
+        console.log(`[Warranty] STAP 6b — VIN zoeken op Allucare zoekpagina: ${vin}`);
+
+        // Vul VIN in het zoekveld
+        const vinFilled = await warrantyPage.evaluate((vinValue) => {
+          const inputs = Array.from(document.querySelectorAll('input[type="text"]'));
+          const vinInput = inputs.find(el => el.placeholder?.includes('VIN'));
+          if (!vinInput) return false;
+
+          // Focus, clear, en vul in
+          vinInput.focus();
+          vinInput.value = '';
+          vinInput.dispatchEvent(new Event('input', { bubbles: true }));
+          vinInput.value = vinValue;
+          vinInput.dispatchEvent(new Event('input', { bubbles: true }));
+          vinInput.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }, vin);
+
+        if (vinFilled) {
+          console.log('[Warranty] VIN ingevuld in zoekveld');
+          await warrantyPage.waitForTimeout(500);
+
+          // Zoek de "Zoeken" knop bij het Voertuig-sectie
+          // Er zijn twee Zoeken knoppen; we willen die bij "Voertuig"
+          const searchClicked = await warrantyPage.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll('button[type="submit"], button.btn-search'));
+            // Neem de laatste Zoeken knop (die bij Voertuig-sectie)
+            const searchBtns = buttons.filter(b => b.textContent?.trim() === 'Zoeken');
+            if (searchBtns.length > 0) {
+              const vehicleSearchBtn = searchBtns[searchBtns.length - 1];
+              vehicleSearchBtn.click();
+              return `Geklikt op Zoeken knop ${searchBtns.length}/${buttons.length}`;
+            }
+            return null;
+          });
+
+          if (searchClicked) {
+            console.log(`[Warranty] ${searchClicked}`);
+
+            // Wacht tot het formulier rendert na VIN zoekactie
+            console.log('[Warranty] Wachten tot warranty formulier verschijnt na VIN zoekopdracht...');
+            for (let vinWait = 1; vinWait <= 15; vinWait++) {
+              const hasWarrantyForm = await warrantyPage.evaluate(() => {
+                const body = document.body?.innerText || '';
+                const hasLabels = body.includes('Gebruiksvoorwaarden') || body.includes('Kilometerstand') || body.includes('kilometerstand');
+                const hasToggles = document.querySelectorAll('mat-slide-toggle, .mat-slide-toggle, .mat-mdc-slide-toggle').length > 0;
+                const hasInputs = document.querySelectorAll('input[type="number"], input[type="email"]').length > 0;
+                return { hasLabels, hasToggles, hasInputs, bodyLength: body.length };
+              });
+
+              if (hasWarrantyForm.hasLabels || hasWarrantyForm.hasToggles || hasWarrantyForm.hasInputs) {
+                console.log(`[Warranty] Warranty formulier verschenen na VIN zoekopdracht! (${vinWait * 2}s)`);
+                formRendered = true;
+                break;
+              }
+
+              // Check ook of er een foutmelding of "geen resultaat" is
+              const pageText = await warrantyPage.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
+              if (pageText.includes('geen resultaat') || pageText.includes('niet gevonden') || pageText.includes('no result')) {
+                console.log(`[Warranty] VIN niet gevonden in Allucare: ${pageText.substring(0, 200)}`);
+                break;
+              }
+
+              console.log(`[Warranty] Wachten op formulier na VIN zoek (${vinWait}/15, body: ${hasWarrantyForm.bodyLength} chars)`);
+              await warrantyPage.waitForTimeout(2000);
+            }
+          } else {
+            console.log('[Warranty] Geen Zoeken knop gevonden');
+          }
+        } else {
+          console.log('[Warranty] VIN zoekveld niet gevonden');
+        }
+
+        if (!formRendered) {
+          // Dump pagina-inhoud voor diagnostiek
+          const afterSearchContent = await warrantyPage.evaluate(() => document.body?.innerText?.substring(0, 1000) || '');
+          console.log(`[Warranty] Pagina na VIN zoekopdracht: ${afterSearchContent.substring(0, 500)}`);
+        }
+      } else {
+        console.log('[Warranty] Geen VIN zoekveld gevonden op pagina — ga toch door...');
+      }
     }
 
     const pageContent = await warrantyPage.evaluate(() => document.body?.innerText || '');
