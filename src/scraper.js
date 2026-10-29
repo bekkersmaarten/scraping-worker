@@ -532,6 +532,22 @@ async function extractRecalls(page) {
 async function extractMaintenance(page, context, kmStand, vin) {
   console.log('[Maintenance] Start onderhoud extractie...');
 
+  // ── OPEL SHORTCUT: Lees frequentie uit ESA Voorspelling ──
+  // Voor Opel (W0V/W0L) is de ESA Voorspelling-pagina de enige betrouwbare
+  // bron voor de onderhoudsfrequentie. Lukt dat niet → frequentie leeg laten.
+  const isOpel = vin && (vin.startsWith('W0V') || vin.startsWith('W0L'));
+  if (isOpel) {
+    console.log('[Maintenance] Opel gedetecteerd — frequentie via ESA Voorspelling...');
+    const esaFreq = await extractFromESA(page, context);
+    if (esaFreq) {
+      console.log(`[Maintenance] Opel frequentie via ESA: ${esaFreq.km} km / ${esaFreq.months} maanden`);
+    } else {
+      console.log('[Maintenance] Opel ESA Voorspelling leverde niets op — frequentie wordt leeg gelaten');
+    }
+    // Voor Opel geen andere bronnen proberen: ESA of niets
+    return { intervals: [], interval_pricing: [], prices: [], service_frequency: esaFreq };
+  }
+
   // ── PRIMAIRE METHODE: Documentatie route (PDF met exact schema) ──
   let serviceFrequencyFromDoc = null;
   if (vin) {
@@ -1296,27 +1312,28 @@ async function extractFromESA(page, context) {
     await esaPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
     await esaPage.waitForTimeout(3000);
 
-    // Zoek en klik "Details" tab
-    let detailsClicked = false;
-    const detailsSelectors = [
-      'a:has-text("Details")', 'button:has-text("Details")',
-      'span:has-text("Details")', '[role="tab"]:has-text("Details")',
-      'li:has-text("Details") a', '.nav-link:has-text("Details")',
-      'mat-tab-header :has-text("Details")'
-    ];
-
-    // Check ook frames binnen ESA pagina
+    // Zoek en klik "Voorspelling" tab (of "Details" tab als fallback)
+    // ESA kan Voorspelling als apart tabblad hebben, of als sectie onder Details
+    let tabClicked = false;
     const esaFrames = esaPage.frames();
+
+    // Probeer eerst "Voorspelling" tab direct
+    const voorspellingSelectors = [
+      'a:has-text("Voorspelling")', 'button:has-text("Voorspelling")',
+      'span:has-text("Voorspelling")', '[role="tab"]:has-text("Voorspelling")',
+      'li:has-text("Voorspelling") a', '.nav-link:has-text("Voorspelling")',
+      'a:has-text("Prediction")', 'a:has-text("Prédiction")'
+    ];
     for (const frame of esaFrames) {
-      if (detailsClicked) break;
-      for (const sel of detailsSelectors) {
+      if (tabClicked) break;
+      for (const sel of voorspellingSelectors) {
         try {
-          const detailsTab = await frame.$(sel);
-          if (detailsTab) {
-            const txt = (await detailsTab.textContent()).trim();
-            console.log(`[ESA] Details tab gevonden: "${txt}"`);
-            await detailsTab.click();
-            detailsClicked = true;
+          const tab = await frame.$(sel);
+          if (tab) {
+            const txt = (await tab.textContent()).trim();
+            console.log(`[ESA] Voorspelling tab gevonden: "${txt}"`);
+            await tab.click();
+            tabClicked = true;
             await esaPage.waitForTimeout(3000);
             break;
           }
@@ -1324,8 +1341,34 @@ async function extractFromESA(page, context) {
       }
     }
 
-    if (!detailsClicked) {
-      console.log('[ESA] Details tab niet gevonden, probeer direct op pagina...');
+    // Fallback: "Details" tab (Voorspelling kan een sectie daarbinnen zijn)
+    if (!tabClicked) {
+      const detailsSelectors = [
+        'a:has-text("Details")', 'button:has-text("Details")',
+        'span:has-text("Details")', '[role="tab"]:has-text("Details")',
+        'li:has-text("Details") a', '.nav-link:has-text("Details")',
+        'mat-tab-header :has-text("Details")'
+      ];
+      for (const frame of esaFrames) {
+        if (tabClicked) break;
+        for (const sel of detailsSelectors) {
+          try {
+            const tab = await frame.$(sel);
+            if (tab) {
+              const txt = (await tab.textContent()).trim();
+              console.log(`[ESA] Details tab gevonden: "${txt}"`);
+              await tab.click();
+              tabClicked = true;
+              await esaPage.waitForTimeout(3000);
+              break;
+            }
+          } catch (e) { continue; }
+        }
+      }
+    }
+
+    if (!tabClicked) {
+      console.log('[ESA] Voorspelling/Details tab niet gevonden, probeer direct op pagina...');
     }
 
     // Zoek "Voorspelling" blok en parse "Onderhoudsbeurt (1 Jaren | 30000 km)"
@@ -1336,13 +1379,14 @@ async function extractFromESA(page, context) {
             const bodyText = document.body?.innerText || '';
             if (bodyText.trim().length < 20) return { error: 'empty' };
 
-            // Zoek "Onderhoudsbeurt (X Jaren | YYYYY km)" patroon
-            // Varianten: "Onderhoudsbeurt (1 Jaren | 30000 km)"
-            //            "Onderhoudsbeurt (2 Jaren | 40000 km)"
+            // Zoek "Onderhoudsbeurt" met "X Jaren | YYYYY km" patroon
+            // Varianten met haakjes: "Onderhoudsbeurt (1 Jaren | 20000 km)"
+            // Varianten zonder haakjes: "Onderhoudsbeurt  1 Jaren | 20000 km"
+            // Of op dezelfde regel: "Onderhoudsbeurt\n1 Jaren | 20000 km"
             const patterns = [
-              /[Oo]nderhoudsbeurt\s*\(\s*(\d+)\s*[Jj]a(?:ren|ar)\s*\|\s*(\d[\d.\s]*)\s*km\s*\)/gi,
-              /[Mm]aintenance\s*\(\s*(\d+)\s*[Yy]ear[s]?\s*\|\s*(\d[\d.\s]*)\s*km\s*\)/gi,
-              /[Ee]ntretien\s*\(\s*(\d+)\s*[Aa]n[s]?\s*\|\s*(\d[\d.\s]*)\s*km\s*\)/gi,
+              /[Oo]nderhoudsbeurt\s*\(?\s*(\d+)\s*[Jj]a(?:ren|ar)\s*\|\s*(\d[\d.\s]*)\s*km\s*\)?/gi,
+              /[Mm]aintenance\s*\(?\s*(\d+)\s*[Yy]ear[s]?\s*\|\s*(\d[\d.\s]*)\s*km\s*\)?/gi,
+              /[Ee]ntretien\s*\(?\s*(\d+)\s*[Aa]n[s]?\s*\|\s*(\d[\d.\s]*)\s*km\s*\)?/gi,
             ];
 
             for (const pattern of patterns) {
