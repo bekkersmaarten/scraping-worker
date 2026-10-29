@@ -1286,18 +1286,29 @@ async function extractFromESA(page, context) {
     console.log(`[ESA] Pages na ESA klik: ${allPages.map(p => p.url().substring(0, 80)).join(', ')}`);
 
     let esaPage = null;
+    // Voorkeur: de echte ESA app (fair-computer.de), NIET servicebox.mpsa.com/esa/ (wrapper)
     for (const p of allPages) {
       const url = p.url().toLowerCase();
-      if (url.includes('esa') && !url.includes('about:blank')) {
+      if (url.includes('fair-computer') || url.includes('psa.esa')) {
         esaPage = p;
+        console.log(`[ESA] Echte ESA app gevonden: ${p.url().substring(0, 100)}`);
         break;
       }
     }
-
-    // Fallback: nieuwste pagina die niet de hoofdpagina is
+    // Fallback: zoek pagina met 'esa' maar NIET servicebox wrapper
     if (!esaPage) {
       for (const p of allPages) {
-        if (p !== page && p.url() !== 'about:blank') {
+        const url = p.url().toLowerCase();
+        if (url.includes('esa') && !url.includes('about:blank') && !url.includes('servicebox.mpsa.com')) {
+          esaPage = p;
+          break;
+        }
+      }
+    }
+    // Laatste fallback: nieuwste pagina die niet de hoofdpagina is
+    if (!esaPage) {
+      for (const p of allPages) {
+        if (p !== page && p.url() !== 'about:blank' && !p.url().includes('servicebox.mpsa.com/esa')) {
           esaPage = p;
         }
       }
@@ -1312,26 +1323,38 @@ async function extractFromESA(page, context) {
     await esaPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
     await esaPage.waitForTimeout(3000);
 
-    // Zoek en klik "Voorspelling" tab (of "Details" tab als fallback)
-    // ESA kan Voorspelling als apart tabblad hebben, of als sectie onder Details
-    let tabClicked = false;
-    const esaFrames = esaPage.frames();
+    // Log pagina-inhoud voor diagnostiek
+    const esaBodyText = await esaPage.evaluate(() => document.body?.innerText?.substring(0, 500) || '').catch(() => '');
+    console.log(`[ESA] Pagina inhoud (${esaBodyText.length} chars): ${esaBodyText.substring(0, 200)}`);
 
-    // Probeer eerst "Voorspelling" tab direct
+    // Log alle frames
+    const esaFrameUrls = esaPage.frames().map(f => f.url().substring(0, 100));
+    console.log(`[ESA] Frames: ${esaFrameUrls.join(', ')}`);
+
+    // De ESA app op fair-computer.de opent standaard op /Vehicle/Details
+    // De "Voorspelling" pagina is op /Vehicle/Prediction (of een tab/link op de pagina)
+    // Zoek eerst naar "Voorspelling" tab/link in de pagina of frames
+    let tabClicked = false;
+
+    // Verzamel alle frames + de pagina zelf om tabs in te zoeken
+    const allEsaFrames = [esaPage, ...esaPage.frames()];
+
+    // Probeer "Voorspelling" / "Prediction" tab/link te klikken
     const voorspellingSelectors = [
       'a:has-text("Voorspelling")', 'button:has-text("Voorspelling")',
       'span:has-text("Voorspelling")', '[role="tab"]:has-text("Voorspelling")',
       'li:has-text("Voorspelling") a', '.nav-link:has-text("Voorspelling")',
-      'a:has-text("Prediction")', 'a:has-text("Prédiction")'
+      'a:has-text("Prediction")', 'a:has-text("Prédiction")',
+      'a[href*="Prediction"]', 'a[href*="prediction"]', 'a[href*="Voorspelling"]'
     ];
-    for (const frame of esaFrames) {
+    for (const frameOrPage of allEsaFrames) {
       if (tabClicked) break;
       for (const sel of voorspellingSelectors) {
         try {
-          const tab = await frame.$(sel);
+          const tab = await frameOrPage.$(sel);
           if (tab) {
             const txt = (await tab.textContent()).trim();
-            console.log(`[ESA] Voorspelling tab gevonden: "${txt}"`);
+            console.log(`[ESA] Voorspelling tab/link gevonden: "${txt}"`);
             await tab.click();
             tabClicked = true;
             await esaPage.waitForTimeout(3000);
@@ -1341,19 +1364,39 @@ async function extractFromESA(page, context) {
       }
     }
 
+    // Fallback: navigeer direct naar /Vehicle/Prediction URL als tab niet gevonden
+    if (!tabClicked) {
+      const esaUrl = esaPage.url();
+      if (esaUrl.includes('fair-computer.de')) {
+        // Probeer /Vehicle/Prediction path
+        const baseUrl = esaUrl.split('/Vehicle/')[0];
+        const vinParam = esaUrl.includes('vin=') ? esaUrl.split('vin=')[1].split('&')[0] : '';
+        if (baseUrl && vinParam) {
+          const predictionUrl = `${baseUrl}/Vehicle/Prediction?vin=${vinParam}`;
+          console.log(`[ESA] Direct navigeren naar Voorspelling: ${predictionUrl}`);
+          try {
+            await esaPage.goto(predictionUrl, { waitUntil: 'networkidle', timeout: 15000 });
+            await esaPage.waitForTimeout(3000);
+            tabClicked = true;
+          } catch (e) {
+            console.log(`[ESA] Navigatie naar Prediction mislukt: ${e.message.substring(0, 100)}`);
+          }
+        }
+      }
+    }
+
     // Fallback: "Details" tab (Voorspelling kan een sectie daarbinnen zijn)
     if (!tabClicked) {
       const detailsSelectors = [
         'a:has-text("Details")', 'button:has-text("Details")',
         'span:has-text("Details")', '[role="tab"]:has-text("Details")',
-        'li:has-text("Details") a', '.nav-link:has-text("Details")',
-        'mat-tab-header :has-text("Details")'
+        'li:has-text("Details") a', '.nav-link:has-text("Details")'
       ];
-      for (const frame of esaFrames) {
+      for (const frameOrPage of allEsaFrames) {
         if (tabClicked) break;
         for (const sel of detailsSelectors) {
           try {
-            const tab = await frame.$(sel);
+            const tab = await frameOrPage.$(sel);
             if (tab) {
               const txt = (await tab.textContent()).trim();
               console.log(`[ESA] Details tab gevonden: "${txt}"`);
@@ -1368,12 +1411,14 @@ async function extractFromESA(page, context) {
     }
 
     if (!tabClicked) {
-      console.log('[ESA] Voorspelling/Details tab niet gevonden, probeer direct op pagina...');
+      console.log('[ESA] Voorspelling/Details tab niet gevonden, zoek op huidige pagina...');
     }
 
-    // Zoek "Voorspelling" blok en parse "Onderhoudsbeurt (1 Jaren | 30000 km)"
+    // Zoek "Onderhoudsbeurt" patroon in de ESA pagina en al haar frames
+    // Na navigatie opnieuw frames ophalen (pagina kan veranderd zijn)
     const esaFreq = await (async () => {
-      for (const frame of esaPage.frames()) {
+      const freshFrames = [esaPage, ...esaPage.frames()];
+      for (const frame of freshFrames) {
         try {
           const result = await frame.evaluate(() => {
             const bodyText = document.body?.innerText || '';
