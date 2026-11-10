@@ -14,6 +14,38 @@ const pdfParse = require('pdf-parse');
 
 const SERVICEBOX_URL = process.env.SERVICEBOX_URL || 'https://servicebox.mpsa.com';
 
+// =========================================
+// SESSIE CACHE — hergebruik SSO cookies
+// =========================================
+// Na succesvolle login slaan we cookies op per username.
+// Bij de volgende scrape injecteren we die cookies zodat we
+// niet opnieuw door SSO hoeven. Als de sessie verlopen is
+// (redirect naar idfed), loggen we opnieuw in.
+const sessionCache = new Map(); // username → { cookies, savedAt }
+const SESSION_MAX_AGE_MS = 45 * 60 * 1000; // 45 minuten max
+
+function getCachedSession(username) {
+  const entry = sessionCache.get(username);
+  if (!entry) return null;
+  if (Date.now() - entry.savedAt > SESSION_MAX_AGE_MS) {
+    console.log(`[Session] Cache verlopen voor ${username} (${Math.round((Date.now() - entry.savedAt) / 60000)}min oud)`);
+    sessionCache.delete(username);
+    return null;
+  }
+  console.log(`[Session] Cache hit voor ${username} (${Math.round((Date.now() - entry.savedAt) / 60000)}min oud, ${entry.cookies.length} cookies)`);
+  return entry.cookies;
+}
+
+async function saveSession(username, context) {
+  try {
+    const cookies = await context.cookies();
+    sessionCache.set(username, { cookies, savedAt: Date.now() });
+    console.log(`[Session] ${cookies.length} cookies opgeslagen voor ${username}`);
+  } catch (e) {
+    console.log(`[Session] Kon cookies niet opslaan: ${e.message.substring(0, 80)}`);
+  }
+}
+
 /**
  * Vertaal Playwright / technische fouten naar korte NL-meldingen.
  * De ruwe fout blijft in de console.log; alleen de schone melding gaat naar de klant.
@@ -77,6 +109,16 @@ async function scrapeServicebox(kenteken, kmStand, credentials = {}) {
       password: PASSWORD
     }
   });
+
+  // Injecteer cached cookies als die er zijn
+  const cachedCookies = getCachedSession(USERNAME);
+  if (cachedCookies) {
+    try {
+      await context.addCookies(cachedCookies);
+    } catch (e) {
+      console.log(`[Session] Kon cookies niet injecteren: ${e.message.substring(0, 80)}`);
+    }
+  }
 
   // Luister naar nieuwe pagina's (popup vensters van bijv. Menu Pricing)
   let popupPage = null;
@@ -146,7 +188,7 @@ async function login(page, USERNAME, PASSWORD) {
   // Check of we ingelogd zijn (frameset = Servicebox is geladen)
   if (currentUrl.includes('loadPage.jsp') || currentUrl.includes('referer.jsp')) {
     console.log('[Login] Al ingelogd (HTTP credentials werkten)');
-    // We navigeren straks direct naar de juiste pagina's — frameset niet nodig
+    await saveSession(USERNAME, page.context());
     await page.waitForTimeout(2000);
     return;
   }
@@ -190,9 +232,12 @@ async function login(page, USERNAME, PASSWORD) {
     await page.keyboard.press('Enter');
   }
 
-  await page.waitForURL(/servicebox\.mpsa\.com/, { timeout: 30000 });
+  await page.waitForURL(/servicebox\.mpsa\.com/, { timeout: 12000 });
   await page.waitForTimeout(3000);
   console.log(`[Login] Ingelogd! URL: ${page.url()}`);
+
+  // Sla sessie op voor hergebruik
+  await saveSession(USERNAME, page.context());
 }
 
 // =========================================
@@ -2157,6 +2202,16 @@ async function scrapeQuotelink(vin, kmStand, credentials = {}) {
     }
   });
 
+  // Injecteer cached cookies als die er zijn
+  const cachedCookies = getCachedSession(USERNAME);
+  if (cachedCookies) {
+    try {
+      await context.addCookies(cachedCookies);
+    } catch (e) {
+      console.log(`[Session] Kon cookies niet injecteren: ${e.message.substring(0, 80)}`);
+    }
+  }
+
   const page = await context.newPage();
 
   try {
@@ -2239,6 +2294,16 @@ async function activateWarranty(vin, kmStand, customerEmail, credentials = {}) {
       password: PASSWORD
     }
   });
+
+  // Injecteer cached cookies als die er zijn
+  const cachedCookies = getCachedSession(USERNAME);
+  if (cachedCookies) {
+    try {
+      await context.addCookies(cachedCookies);
+    } catch (e) {
+      console.log(`[Session] Kon cookies niet injecteren: ${e.message.substring(0, 80)}`);
+    }
+  }
 
   // Luister naar nieuwe pagina's (het 2+6 formulier opent in nieuw venster)
   let warrantyPage = null;
@@ -4397,6 +4462,16 @@ async function scrapeFrequencyOnly(kenteken, credentials = {}) {
       password: PASSWORD
     }
   });
+
+  // Injecteer cached cookies als die er zijn
+  const cachedCookies = getCachedSession(USERNAME);
+  if (cachedCookies) {
+    try {
+      await context.addCookies(cachedCookies);
+    } catch (e) {
+      console.log(`[Session] Kon cookies niet injecteren: ${e.message.substring(0, 80)}`);
+    }
+  }
 
   const page = await context.newPage();
 
