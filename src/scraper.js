@@ -171,6 +171,27 @@ async function scrapeServicebox(kenteken, kmStand, credentials = {}) {
 // LOGIN (HTTP credentials + SSO fallback)
 // =========================================
 async function login(page, USERNAME, PASSWORD) {
+  const MAX_LOGIN_ATTEMPTS = 3;
+  const RETRY_DELAYS = [5000, 15000, 30000]; // 5s, 15s, 30s backoff
+
+  for (let attempt = 1; attempt <= MAX_LOGIN_ATTEMPTS; attempt++) {
+    try {
+      await loginAttempt(page, USERNAME, PASSWORD);
+      return; // Succes!
+    } catch (e) {
+      const isTimeout = e.message.includes('Timeout') || e.message.includes('timeout') || e.message.includes('reageerde niet op tijd');
+      if (!isTimeout || attempt === MAX_LOGIN_ATTEMPTS) {
+        // Niet-timeout errors of laatste poging: gooi door
+        throw e;
+      }
+      const delay = RETRY_DELAYS[attempt - 1] || 30000;
+      console.log(`[Login] Poging ${attempt}/${MAX_LOGIN_ATTEMPTS} timeout — wacht ${delay / 1000}s voor retry...`);
+      await page.waitForTimeout(delay);
+    }
+  }
+}
+
+async function loginAttempt(page, USERNAME, PASSWORD) {
   console.log('[Login] Navigeren naar Servicebox...');
   // Probeer eerst met networkidle, fallback naar domcontentloaded
   try {
