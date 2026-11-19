@@ -206,9 +206,9 @@ async function loginAttempt(page, USERNAME, PASSWORD) {
   const currentUrl = page.url();
   console.log(`[Login] Huidige URL: ${currentUrl}`);
 
-  // Check of we ingelogd zijn (frameset = Servicebox is geladen)
-  if (currentUrl.includes('loadPage.jsp') || currentUrl.includes('referer.jsp')) {
-    console.log('[Login] Al ingelogd (HTTP credentials werkten)');
+  // Check of we ingelogd zijn (elke servicebox.mpsa.com pagina = sessie geldig)
+  if (currentUrl.includes('servicebox.mpsa.com')) {
+    console.log(`[Login] Al ingelogd via sessie (URL: ${currentUrl.substring(0, 80)})`);
     await saveSession(USERNAME, page.context());
     await page.waitForTimeout(2000);
     return;
