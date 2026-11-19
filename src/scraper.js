@@ -206,12 +206,18 @@ async function loginAttempt(page, USERNAME, PASSWORD) {
   const currentUrl = page.url();
   console.log(`[Login] Huidige URL: ${currentUrl}`);
 
-  // Check of we ingelogd zijn (elke servicebox.mpsa.com pagina = sessie geldig)
-  if (currentUrl.includes('servicebox.mpsa.com')) {
-    console.log(`[Login] Al ingelogd via sessie (URL: ${currentUrl.substring(0, 80)})`);
-    await saveSession(USERNAME, page.context());
-    await page.waitForTimeout(2000);
-    return;
+  // Check of we ingelogd zijn (hostname = servicebox.mpsa.com = sessie geldig)
+  // Let op: niet includes() op hele URL, want SSO redirect_uri bevat ook 'servicebox.mpsa.com'
+  try {
+    const urlHost = new URL(currentUrl).hostname;
+    if (urlHost === 'servicebox.mpsa.com') {
+      console.log(`[Login] Al ingelogd via sessie (URL: ${currentUrl.substring(0, 80)})`);
+      await saveSession(USERNAME, page.context());
+      await page.waitForTimeout(2000);
+      return;
+    }
+  } catch (e) {
+    // URL parse error, ga door met login
   }
 
   // SSO login formulier
