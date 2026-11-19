@@ -212,8 +212,11 @@ async function loginAttempt(page, USERNAME, PASSWORD) {
     const urlHost = new URL(currentUrl).hostname;
     if (urlHost === 'servicebox.mpsa.com') {
       console.log(`[Login] Al ingelogd via sessie (URL: ${currentUrl.substring(0, 80)})`);
-      await saveSession(USERNAME, page.context());
+      // Navigeer naar hoofdpagina om context te resetten (anders blijft bijv. Documentatie-context actief)
+      console.log('[Login] Context resetten via hoofdpagina...');
+      await page.goto(SERVICEBOX_URL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
       await page.waitForTimeout(2000);
+      await saveSession(USERNAME, page.context());
       return;
     }
   } catch (e) {
